@@ -21,7 +21,7 @@ class POItem(BaseModel):
     total_cost: float
 
 class PurchaseOrder(Document):
-    id: UUID = Field(default_factory=uuid4)
+    id: UUID = Field(default_factory=uuid4, alias = "_id")
     supplier_id: UUID
     target_branch: UUID         # Where is this going?
     items: List[POItem]

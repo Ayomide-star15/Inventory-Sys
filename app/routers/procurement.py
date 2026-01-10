@@ -47,7 +47,7 @@ async def create_po(
         total_amount=total_amount,
         status=status,
         items=po_items,
-        created_by=current_user.id
+        created_by=current_user.user_id
     )
     await po.save()
     
