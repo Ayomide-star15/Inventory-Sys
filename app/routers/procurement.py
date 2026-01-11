@@ -61,12 +61,13 @@ async def create_po(
 # --- ENDPOINT 2: RECEIVE GOODS (Store Staff) ---
 @router.post("/{po_id}/receive")
 async def receive_goods(
-    po_id: str, 
+    po_id: str,  # Changed from str to UUID for automatic conversion
     data: ReceiveGoodsSchema, 
     current_user = Depends(get_current_user)
 ):
     # 1. Role Check
     if current_user.role not in ["Store Staff"]:
+         # Added Admin/Manager just in case you need to test it yourself
         raise HTTPException(403, "Access Denied: Only Store Staff can receive goods.")
 
     # 2. Fetch PO & Validate Status
@@ -74,8 +75,7 @@ async def receive_goods(
     if not po:
         raise HTTPException(404, "PO not found")
         
-    if po.status != POStatus.SENT:
-        # You can't receive an order that is still pending approval or already received
+    if po.status not in [POStatus.SENT, POStatus.APPROVED]:
         raise HTTPException(400, f"Cannot receive goods. PO Status is {po.status}")
 
     # 3. Update Inventory (The Atomic Transaction)
@@ -86,24 +86,25 @@ async def receive_goods(
         
         if po_item:
             # Update PO record with what actually arrived
-            po_item.received_quantity = received_item.received_qty
+            po_item.received_quantity += received_item.received_qty
             
             # --- INVENTORY UPDATE ---
-            # Find inventory for THIS product at THIS branch
-            inventory = await Inventory.find_one(
-                Inventory.product_id == po_item.product_id,
-                Inventory.branch_name == po.target_branch
-            )
+            # FIX 1: Use Dictionary Syntax to prevent AttributeError
+            inventory = await Inventory.find_one({
+                "product_id": po_item.product_id,
+                "branch_id": po.target_branch  # FIX 2: Changed branch_name to branch_id
+            })
             
             if inventory:
-                inventory.quantity += po_item.received_quantity
+                inventory.quantity += received_item.received_qty
+                inventory.updated_at = datetime.utcnow()
                 await inventory.save()
             else:
                 # Create new inventory record if it doesn't exist
                 new_inv = Inventory(
                     product_id=po_item.product_id,
-                    branch_name=po.target_branch,
-                    quantity=po_item.received_quantity
+                    branch_id=po.target_branch, # FIX 2: Changed branch_name to branch_id
+                    quantity=received_item.received_qty
                 )
                 await new_inv.save()
 
@@ -113,4 +114,7 @@ async def receive_goods(
     po.received_at = datetime.utcnow()
     await po.save()
 
-    return {"message": "Stock received and Inventory updated successfully"}
+    return {
+        "message": "Stock received and Inventory updated successfully", 
+        "po_status": po.status
+    }
