@@ -10,7 +10,6 @@ class ProductBase(BaseModel):
     description: Optional[str] = None
     price: float
     cost_price: float
-    stock_quantity: int
     low_stock_threshold: int = 10
     category_id: UUID
     image_url: Optional[str] = None
@@ -25,7 +24,6 @@ class ProductUpdate(BaseModel):
     description: Optional[str] = None
     price: Optional[float] = None
     cost_price: Optional[float] = None
-    stock_quantity: Optional[int] = None
     low_stock_threshold: Optional[int] = None
     category_id: Optional[UUID] = None
     image_url: Optional[str] = None

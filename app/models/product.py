@@ -17,8 +17,6 @@ class Product(Document):
     price: float = Field(..., gt=0)       # Selling Price (Retail)
     cost_price: float = Field(..., gt=0)  # Buying Price (For Profit Reports)
     
-    # --- Inventory Control ---
-    stock_quantity: int = Field(default=0)
     low_stock_threshold: int = Field(default=10) # Alert Trigger Level
     
     # --- Category Link (Mandatory) ---
