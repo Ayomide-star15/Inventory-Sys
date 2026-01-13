@@ -118,3 +118,65 @@ async def receive_goods(
         "message": "Stock received and Inventory updated successfully", 
         "po_status": po.status
     }
+
+@router.put("/{po_id}/approve")
+async def approve_po(
+    po_id: str, 
+    current_user = Depends(get_current_user)
+):
+    # 1. Manual Role Check
+    # We allow "System Administrator" too, just in case.
+    allowed_roles = ["Finance Manager", "System Administrator"]
+    
+    if current_user.role not in allowed_roles:
+        raise HTTPException(
+            status_code=403, 
+            detail="Access Denied: Only Finance Managers can approve high-value orders."
+        )
+
+    # 2. Fetch the PO
+    po = await PurchaseOrder.get(po_id)
+    if not po:
+        raise HTTPException(404, "Purchase Order not found")
+
+    # 3. Check Logic: Can we actually approve this?
+    if po.status != POStatus.PENDING_APPROVAL:
+        raise HTTPException(
+            400, 
+            f"Cannot approve. Current status is '{po.status}', but it must be '{POStatus.PENDING_APPROVAL}'."
+        )
+
+    # 4. Update Status
+    # Changing it to APPROVED means the Purchase Manager can now see it's ready.
+    po.status = POStatus.APPROVED
+    await po.save()
+
+    return {
+        "message": "Order approved successfully", 
+        "po_id": str(po.id), 
+        "status": po.status
+    }
+
+@router.put("/{po_id}/reject")
+async def reject_po(
+    po_id: str, 
+    current_user = Depends(get_current_user)
+):
+    # 1. Manual Role Check
+    if current_user.role not in ["Finance Manager", "System Administrator"]:
+        raise HTTPException(403, "Access Denied: Only Finance Managers can reject orders.")
+
+    # 2. Fetch PO
+    po = await PurchaseOrder.get(po_id)
+    if not po:
+        raise HTTPException(404, "Purchase Order not found")
+
+    # 3. Validate Status
+    if po.status != POStatus.PENDING_APPROVAL:
+        raise HTTPException(400, "Only pending orders can be rejected.")
+
+    # 4. Cancel the Order
+    po.status = POStatus. REJECTED
+    await po.save()
+
+    return {"message": "Order rejected and canceled"}

@@ -65,4 +65,6 @@ async def get_product_manager(current_user: User = Depends(get_current_active_us
             status.HTTP_403_FORBIDDEN, 
             detail="Access Denied: Requires Admin or Purchase Manager permissions."
         )
+
     return current_user
+
