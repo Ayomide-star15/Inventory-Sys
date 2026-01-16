@@ -11,10 +11,10 @@ class Inventory(Document):
     id: UUID = Field(default_factory=uuid4, alias="_id")
 
     # --- FIX 1: Use Annotated + Indexed() for querying ---
-    product_id: Annotated[UUID, Indexed()] 
+    product_id: Annotated[str, Indexed()] 
     
     # --- FIX 2: Renamed 'branch_name' to 'branch_id' to match your Router ---
-    branch_id: Annotated[UUID, Indexed()] 
+    branch_id: Annotated[str, Indexed()] 
 
     quantity: int = 0
     reorder_point: int = 10 
@@ -29,3 +29,18 @@ class Inventory(Document):
         indexes = [
             [("product_id", 1), ("branch_id", 1)]
         ]
+
+class AdjustmentLog(Document):
+    """
+    Keeps a history of why stock was changed (Theft, Damage, etc.)
+    """
+    branch_id: UUID
+    product_id: UUID
+    user_id: UUID           # <--- This catches the person who did it
+    quantity_removed: int
+    reason: str             # "Damaged", "Expired"
+    note: Optional[str] = None
+    date: datetime = Field(default_factory=datetime.utcnow)
+
+    class Settings:
+        name = "adjustment_logs"

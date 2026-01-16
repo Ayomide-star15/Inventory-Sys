@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.core.database import init_db
-from app.routers import auth, branch, user, category, product, supplier, procurement  # <--- NEW
+from app.routers import auth, branch, user, category, product, supplier, procurement, inventory  # <--- NEW
 # ---------------------------------------------------------
 # 1. LIFESPAN MANAGER
 # ---------------------------------------------------------
@@ -48,6 +48,7 @@ app.include_router(category.router, prefix="/categories", tags=["Category Manage
 app.include_router(product.router, prefix="/products", tags=["Product Management"]) # <--- NEW
 app.include_router(supplier.router, prefix="/suppliers", tags=["Supplier Management"]) # <--- NEW
 app.include_router(procurement.router) # <--- NEW
+app.include_router(inventory.router, prefix="/inventory", tags=["Inventory Management"]) # <--- NEW
 
 @app.get("/")
 def root():

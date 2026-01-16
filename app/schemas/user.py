@@ -18,7 +18,7 @@ class UserBase(BaseModel):
     first_name: str
     last_name: str
     role: UserRole = UserRole.STORE_STAFF
-    branch_id: Optional[str] = None
+    branch_id: Optional[UUID] = None
 
    # Used when Admin sends the invite. NO password required here
 class UserInvite(UserBase):
