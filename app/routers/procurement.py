@@ -357,14 +357,23 @@ async def get_purchase_orders(
 # 6. GET SINGLE PURCHASE ORDER
 # ==========================================
 @router.get("/{po_id}", response_model=dict)
-async def get_purchase_order(
+async def Get_detailed_information_about_a_specific_Purchase_Order(
     po_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
     """
     Get detailed information about a specific Purchase Order.
+    
+    Access Control:
+    - Admin: Any PO, anytime
+    - Finance Manager: Any PO, anytime
+    - Purchase Manager: Any PO, anytime
+    - Store Manager: Only POs for their branch, anytime
+    - Store Staff: Only POs for their branch AND only if ready to receive (Sent/Approved status)
+    - Sales Staff: DENIED
     """
     
+    # 1. Fetch PO
     po = await PurchaseOrder.get(po_id)
     if not po:
         raise HTTPException(
@@ -372,11 +381,68 @@ async def get_purchase_order(
             detail="Purchase Order not found"
         )
     
-    # Get supplier and branch details
+    # 2. ACCESS CONTROL LOGIC
+    
+    # Admin - Full access, anytime
+    if current_user.role == UserRole.ADMIN:
+        pass  # Allowed
+    
+    # Finance Manager - View any PO, anytime
+    elif current_user.role == UserRole.FINANCE:
+        pass  # Allowed
+    
+    # Purchase Manager - View any PO, anytime
+    elif current_user.role == UserRole.PURCHASE:
+        pass  # Allowed
+    
+    # Store Manager - Only their branch, any status
+    elif current_user.role == UserRole.STORE_MANAGER:
+        if not current_user.branch_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Your account is not assigned to a branch"
+            )
+        
+        if str(po.target_branch) != str(current_user.branch_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access Denied: You can only view Purchase Orders for your assigned branch"
+            )
+    
+    # Store Staff - Only their branch AND only if ready to receive
+    elif current_user.role == UserRole.STORE_STAFF:
+        if not current_user.branch_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Your account is not assigned to a branch"
+            )
+        
+        # Check 1: Must be for their branch
+        if str(po.target_branch) != str(current_user.branch_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access Denied: This order is not for your branch"
+            )
+        
+        # Check 2: Must be ready to receive (Sent or Approved status)
+        if po.status not in [POStatus.SENT, POStatus.APPROVED]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access Denied: This order is not ready for receiving. Current status: {po.status}. You can only view orders that are 'Sent' or 'Approved'."
+            )
+    
+    # Sales Staff and any other role - DENIED
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view Purchase Orders"
+        )
+    
+    # 3. Get supplier and branch details
     supplier = await Supplier.get(po.supplier_id)
     branch = await Branch.get(po.target_branch)
     
-    # Format items with product names
+    # 4. Format items with product names
     items_detail = []
     for item in po.items:
         product = await Product.get(item.product_id)
@@ -389,6 +455,7 @@ async def get_purchase_order(
             "total_cost": item.total_cost
         })
     
+    # 5. Return response
     return {
         "id": str(po.id),
         "supplier_name": supplier.name if supplier else "Unknown",
@@ -404,7 +471,6 @@ async def get_purchase_order(
         "received_at": po.received_at,
         "receiving_notes": po.receiving_notes
     }
-
 
 # ==========================================
 # 7. GET PENDING APPROVALS (FOR FINANCE)
