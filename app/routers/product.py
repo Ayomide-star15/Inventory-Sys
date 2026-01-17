@@ -12,7 +12,7 @@ from app.dependencies.auth import get_current_user, get_product_manager
 router = APIRouter()
 
 # ==========================================
-# 🔒 MANAGER ACTIONS (Admin + Purchase Manager)
+# MANAGER ACTIONS (Admin + Purchase Manager)
 # ==========================================
 
 @router.post("/", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)

@@ -114,3 +114,54 @@ async def get_adjustment_history(
     ).sort(-AdjustmentLog.date).to_list()
     
     return logs
+
+@router.get("/{branch_id}", response_model=list)
+async def get_branch_inventory(
+    branch_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all inventory items for a specific branch.
+    """
+    
+    # Role-based access: Store staff can only see their branch
+    if current_user.role in ["Store Manager", "Store Staff", "Sales Staff"]:
+        if str(current_user.branch_id) != str(branch_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only view inventory for your assigned branch"
+            )
+    
+    # Fetch inventory
+    inventory_items = await Inventory.find(
+        Inventory.branch_id == branch_id
+    ).to_list()
+    
+    return inventory_items
+
+
+@router.get("/{branch_id}/low-stock", response_model=list)
+async def get_low_stock_items(
+    branch_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get items that are below reorder point for a specific branch.
+    Useful for generating purchase orders.
+    """
+    
+    # Access control
+    if current_user.role in ["Store Manager", "Store Staff"]:
+        if str(current_user.branch_id) != str(branch_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+    
+    # Find items below reorder point
+    low_stock_items = await Inventory.find({
+        "branch_id": branch_id,
+        "$expr": {"$lte": ["$quantity", "$reorder_point"]}
+    }).to_list()
+    
+    return low_stock_items
