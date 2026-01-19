@@ -25,7 +25,7 @@ class Product(Document):
     image_url: Optional[str] = "https://placehold.co/400?text=No+Image"
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime =  Field(default_factory=datetime.utcnow)
 
     class Settings:
         name = "products"
