@@ -134,7 +134,7 @@ async def approve_transfer(
     """
     Approve a transfer request.
     
-    Access: Purchase Manager of SOURCE branch (where items are coming from)
+    Access: Store Manager of SOURCE branch (where items are coming from)
     - Can approve full quantity or reduce it
     """
     
