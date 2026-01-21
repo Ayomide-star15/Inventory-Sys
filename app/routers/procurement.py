@@ -221,7 +221,7 @@ async def receive_goods(
     Receive goods from a Purchase Order.
     This is THE endpoint that updates inventory!
     
-    Only Store Staff can receive goods.
+    Only Store Staff from the TARGET BRANCH can receive goods.
     """
     
     # 1. Role Check
@@ -239,14 +239,31 @@ async def receive_goods(
             detail="Purchase Order not found"
         )
     
-    # 3. Validate PO Status
+    # ==========================================
+    # 🔒 FIX: VERIFY BRANCH MATCH
+    # ==========================================
+    # 3. Check if user belongs to the target branch
+    if not current_user.branch_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Your account is not assigned to a branch"
+        )
+    
+    if str(po.target_branch) != str(current_user.branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access Denied: This order is for another branch. You can only receive goods for your assigned branch."
+        )
+    # ==========================================
+    
+    # 4. Validate PO Status
     if po.status not in [POStatus.SENT, POStatus.APPROVED]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot receive goods. PO Status is '{po.status}'. Must be 'Sent' or 'Approved'"
         )
 
-    # 4. Update Inventory for Each Item
+    # 5. Update Inventory for Each Item
     for received_item in data.items:
         
         # Find matching item in PO
@@ -303,7 +320,7 @@ async def receive_goods(
             
             print(f"✅ Created new inventory: {product.name} - Quantity: {received_item.received_qty}")
 
-    # 5. Mark PO as Received
+    # 6. Mark PO as Received
     po.status = POStatus.RECEIVED
     po.receiving_notes = data.notes
     po.received_at = datetime.utcnow()
@@ -315,7 +332,6 @@ async def receive_goods(
         "status": po.status,
         "items_received": len(data.items)
     }
-
 
 # ==========================================
 # 5. GET ALL PURCHASE ORDERS
