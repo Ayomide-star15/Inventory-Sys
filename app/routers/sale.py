@@ -87,10 +87,10 @@ async def get_products_for_sale(
     result = []
     for product in products:
         # Find inventory at user's branch
-        inventory = await Inventory.find_one({
-            "product_id": str(product.id),
-            "branch_id": str(current_user.branch_id)
-        })
+        inventory = await Inventory.find_one(
+            (Inventory.product_id == str(product.id)) & 
+            (Inventory.branch_id == str(current_user.branch_id))
+        )
         
         # Only show products with stock > 0
         if inventory and inventory.quantity > 0:
@@ -147,10 +147,10 @@ async def search_product_by_barcode(
         )
     
     # Check inventory
-    inventory = await Inventory.find_one({
-        "product_id": str(product.id),
-        "branch_id": str(current_user.branch_id)
-    })
+    inventory = await Inventory.find_one(
+        (Inventory.product_id == str(product.id)) & 
+        (Inventory.branch_id == str(current_user.branch_id))
+    )
     
     if not inventory or inventory.quantity <= 0:
         raise HTTPException(
@@ -227,10 +227,10 @@ async def create_sale(
             )
         
         # Check inventory at this branch
-        inventory = await Inventory.find_one({
-            "product_id": str(item.product_id),
-            "branch_id": branch_id_str
-        })
+        inventory = await Inventory.find_one(
+            (Inventory.product_id == str(item.product_id)) & 
+            (Inventory.branch_id == branch_id_str)
+        )
         
         if not inventory:
             raise HTTPException(
@@ -286,7 +286,7 @@ async def create_sale(
     # 7. Create sale record
     new_sale = Sale(
         sale_number=sale_number,
-        branch_id=current_user.branch_id,
+        branch_id= current_user.branch_id, # pyright: ignore[reportArgumentType]
         sold_by=current_user.user_id,
         items=sale_items,
         subtotal=subtotal,
@@ -302,18 +302,20 @@ async def create_sale(
     )
     await new_sale.insert()
     
-    # 8. CRITICAL: Deduct from inventory
+    # 8. CRITICAL: Deduct from inventory - FIXED
     for item in sale_data.items:
-        inventory = await Inventory.find_one({
-            "product_id": str(item.product_id),
-            "branch_id": branch_id_str
-        })
+        inventory = await Inventory.find_one(
+            (Inventory.product_id == str(item.product_id)) & 
+            (Inventory.branch_id == branch_id_str)
+        )
         
-        inventory.quantity -= item.quantity
-        inventory.updated_at = datetime.utcnow()
-        await inventory.save()
-        
-        print(f"✅ Sale recorded: {product.name} - Sold {item.quantity}, New stock: {inventory.quantity}")
+        if inventory:
+            inventory.quantity -= item.quantity
+            inventory.updated_at = datetime.utcnow()
+            await inventory.save()
+            
+            product = await Product.get(item.product_id)
+            print(f"Sale recorded: {product.name} - Sold {item.quantity}, New stock: {inventory.quantity}") # pyright: ignore[reportOptionalMemberAccess]
     
     # 9. Return receipt data
     return {
@@ -461,7 +463,7 @@ async def list_sales(
         query["payment_method"] = payment_method
     
     # Fetch sales
-    sales = await Sale.find(query).sort(-Sale.created_at).limit(100).to_list()
+    sales = await Sale.find(query).sort(-Sale.created_at).limit(100).to_list() # type: ignore
     
     # Format response
     result = []
@@ -583,10 +585,10 @@ async def cancel_sale(
     
     # Return items to inventory
     for item in sale.items:
-        inventory = await Inventory.find_one({
-            "product_id": str(item.product_id),
-            "branch_id": str(sale.branch_id)
-        })
+        inventory = await Inventory.find_one(
+            (Inventory.product_id == str(item.product_id)) & 
+            (Inventory.branch_id == str(sale.branch_id))
+        )
         
         if inventory:
             inventory.quantity += item.quantity_sold

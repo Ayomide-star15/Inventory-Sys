@@ -24,7 +24,7 @@ class User(Document):
     last_name: str
 # Password is None until they accept their invite and set it
     hashed_password: Optional[str] = None
-    branch_id: Optional[str] = None
+    branch_id: Optional[UUID] = None
     role: UserRole
     #Account is inactive until [password is set / invite accepted]
     is_active: bool = False
@@ -33,6 +33,14 @@ class User(Document):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_login: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+class UserUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    role: Optional[UserRole] = None
+    branch_id: Optional[UUID] = None       # ← changed to UUID
+    is_active: Optional[bool] = None
 
     class Settings:
         name = "users"

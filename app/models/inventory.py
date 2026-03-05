@@ -11,10 +11,10 @@ class Inventory(Document):
     id: UUID = Field(default_factory=uuid4, alias="_id")
 
     # --- FIX 1: Use Annotated + Indexed() for querying ---
-    product_id: Annotated[str, Indexed()] 
+    product_id: UUID = Field(..., description="ID of the product")
     
     # --- FIX 2: Renamed 'branch_name' to 'branch_id' to match your Router ---
-    branch_id: Annotated[str, Indexed()] 
+    branch_id: UUID = Field(..., description="ID of the branch") 
 
     quantity: int = 0
     reorder_point: int = 10 

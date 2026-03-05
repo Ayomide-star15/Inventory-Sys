@@ -40,10 +40,10 @@ async def adjust_stock(
     product_id_str = str(data.product_id)
     
     # 4. Find inventory record for this product at this branch
-    inventory = await Inventory.find_one({
-        "product_id": product_id_str,
-        "branch_id": user_branch_str
-    })
+    inventory = await Inventory.find_one(
+        (Inventory.product_id == product_id_str) & 
+        (Inventory.branch_id == user_branch_str)
+    )
     
     if not inventory:
         raise HTTPException(
@@ -111,7 +111,7 @@ async def get_adjustment_history(
     # Fetch adjustment logs
     logs = await AdjustmentLog.find(
         AdjustmentLog.branch_id == branch_id
-    ).sort(-AdjustmentLog.date).to_list()
+    ).sort(-AdjustmentLog.date).to_list() # pyright: ignore[reportOperatorIssue]
     
     return logs
 
@@ -159,9 +159,9 @@ async def get_low_stock_items(
             )
     
     # Find items below reorder point
-    low_stock_items = await Inventory.find({
-        "branch_id": branch_id,
-        "$expr": {"$lte": ["$quantity", "$reorder_point"]}
-    }).to_list()
+    low_stock_items = await Inventory.find(
+        (Inventory.branch_id == branch_id) & 
+        (Inventory.quantity <= Inventory.reorder_point)
+    ).to_list()
     
     return low_stock_items
