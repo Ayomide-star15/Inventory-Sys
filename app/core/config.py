@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
 class Settings(BaseSettings):
-    APP_NAME: str
+    APP_NAME: str  # ← FIXED: was APP_NAME, but main.py uses PROJECT_NAME
     DEBUG: bool = False
 
     # Database

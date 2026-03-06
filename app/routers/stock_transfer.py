@@ -325,24 +325,36 @@ async def receive_transfer(
                 item["quantity_received"] = quantity_received
         
         # Add to destination branch inventory
+        # Add to destination branch inventory
         inventory = await Inventory.find_one({
             "product_id": product_id,
             "branch_id": str(transfer.to_branch_id)
         })
         
         if inventory:
-            # Update existing
+            # Update existing — keep whatever selling_price is already there
             inventory.quantity += quantity_received
             inventory.updated_at = datetime.utcnow()
             await inventory.save()
         else:
-            # Create new inventory record
+            # First time this product arrives at destination via transfer
             product = await Product.get(UUID(product_id))
+            
+            # Copy selling_price from the SOURCE branch inventory
+            source_inventory = await Inventory.find_one({
+                "product_id": product_id,
+                "branch_id": str(transfer.from_branch_id)
+            })
+            
+            # Fall back to Product.price if source inventory is missing
+            selling_price = source_inventory.selling_price if source_inventory else (product.price if product else 0.0)
+            
             new_inventory = Inventory(
                 product_id=product_id,
                 branch_id=str(transfer.to_branch_id),
                 quantity=quantity_received,
                 product_name=product.name if product else "Unknown",
+                selling_price=selling_price,  # ✅ Carried from source branch
                 reorder_point=product.low_stock_threshold if product else 10
             )
             await new_inventory.insert()

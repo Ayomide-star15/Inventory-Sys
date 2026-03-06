@@ -14,33 +14,28 @@ class UserRole(str, Enum):
     STORE_STAFF = "Store Staff"
     SALES_STAFF = "Sales Staff"
 
+
 class User(Document):
     user_id: UUID = Field(default_factory=uuid4)
-    # 1. Email is now the unique identifier (Username is removed)
     email: EmailStr = Indexed(unique=True)
-    
-    # 2. Split Name Fields
     first_name: str
     last_name: str
-# Password is None until they accept their invite and set it
     hashed_password: Optional[str] = None
     branch_id: Optional[UUID] = None
     role: UserRole
-    #Account is inactive until [password is set / invite accepted]
     is_active: bool = False
-    
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_login: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    class Settings:
+        name = "users"  # ✅ FIXED: Was outside User class, so MongoDB collection name was never set
 
 
 class UserUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     role: Optional[UserRole] = None
-    branch_id: Optional[UUID] = None       # ← changed to UUID
+    branch_id: Optional[UUID] = None
     is_active: Optional[bool] = None
-
-    class Settings:
-        name = "users"

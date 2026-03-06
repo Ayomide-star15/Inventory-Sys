@@ -98,7 +98,7 @@ async def create_product(
         change_reason="Product created",
         changed_by=manager.user_id,
         changed_by_name=f"{manager.first_name} {manager.last_name}",
-        changed_by_role=str(manager.role),
+        changed_by_role=manager.role.value,
         effective_date=datetime.utcnow(),
         applied_branches=0
     )
@@ -327,7 +327,7 @@ async def update_product_price(
         change_reason=price_update.reason,
         changed_by=manager.user_id,
         changed_by_name=f"{manager.first_name} {manager.last_name}",
-        changed_by_role=str(manager.role),
+        changed_by_role=manager.role.value,
         effective_date=datetime.utcnow(),
         applied_branches=0
     )
@@ -378,7 +378,7 @@ async def get_price_history(
 
     history = await PriceHistory.find(
         PriceHistory.product_id == product_id
-    ).sort("created_at", -1).to_list() # type: ignore
+    ).sort(-PriceHistory.created_at).to_list() 
 
     return {
         "product_id": str(product_id),

@@ -1,34 +1,40 @@
-from typing import Optional, Annotated
-from beanie import Document, Indexed
+from typing import Optional
+from beanie import Document
 from pydantic import Field
 from uuid import UUID, uuid4
 from datetime import datetime
 
+
 class Inventory(Document):
     """
     Tracks how much of a product exists at a SPECIFIC branch.
-    """
-    id: UUID = Field(default_factory=uuid4, alias="_id")
-
-    # --- FIX 1: Use Annotated + Indexed() for querying ---
-    product_id: UUID = Field(..., description="ID of the product")
     
-    # --- FIX 2: Renamed 'branch_name' to 'branch_id' to match your Router ---
-    branch_id: UUID = Field(..., description="ID of the branch") 
+    IMPORTANT: product_id and branch_id are stored as STRINGS
+    for consistent querying across all routers.
+    """
+    id: UUID = Field(default_factory=uuid4)
+
+    # ✅ FIXED: Stored as str (not UUID) so find_one() queries using str(...) always match
+    product_id: str = Field(..., description="ID of the product (string)")
+    branch_id: str = Field(..., description="ID of the branch (string)")
 
     quantity: int = 0
-    reorder_point: int = 10 
-    bin_location: Optional[str] = None # e.g., "Aisle 4, Shelf B"
-    
-    product_name: str = "Unknown Product" # Added to store the name snapshot
+    reorder_point: int = 10
+    bin_location: Optional[str] = None  # e.g., "Aisle 4, Shelf B"
+
+    # ✅ Selling price — automatically copied from Product.price when goods arrive
+    # This is what Sales Staff use at checkout. Never read Product.price directly.
+    selling_price: float = 0.0
+
+    product_name: str = "Unknown Product"
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Settings:
         name = "inventory"
-        # Unique Constraint: A product can only appear once per branch
         indexes = [
             [("product_id", 1), ("branch_id", 1)]
         ]
+
 
 class AdjustmentLog(Document):
     """
@@ -36,9 +42,9 @@ class AdjustmentLog(Document):
     """
     branch_id: UUID
     product_id: UUID
-    user_id: UUID           # <--- This catches the person who did it
+    user_id: UUID
     quantity_removed: int
-    reason: str             # "Damaged", "Expired"
+    reason: str
     note: Optional[str] = None
     date: datetime = Field(default_factory=datetime.utcnow)
 

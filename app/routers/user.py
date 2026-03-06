@@ -269,20 +269,19 @@ async def update_user(
             branch = await Branch.get(update_data.branch_id)
             if not branch:
                 raise HTTPException(status_code=404, detail=f"Branch {update_data.branch_id} not found")
-            user.branch_id = update_data.branch_id
+            user.branch_id = branch.id
 
     # 6. Save changes to Database
     await user.save()
 
     return {
-        "id": str(user.id),  # Force convert ObjectId to string
         "user_id": user.user_id,
         "email": user.email,
         "first_name": user.first_name,
         "last_name": user.last_name,
         "role": user.role,
         "is_active": user.is_active,
-        "branch_id": user.branch_id
+        "branch_id": str(user.branch_id) if user.branch_id else None
     
     }
 

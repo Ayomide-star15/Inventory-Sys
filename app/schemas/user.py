@@ -4,15 +4,17 @@ from app.models.user import UserRole
 from datetime import datetime
 from uuid import UUID
 
-# --- 1. TOKEN SCHEMAS (These were missing) ---
+
+# --- TOKEN SCHEMAS ---
 class Token(BaseModel):
     access_token: str
     token_type: str
 
+
 class TokenData(BaseModel):
     email: Optional[str] = None
 
-# Incoming data - No password required
+
 class UserBase(BaseModel):
     email: EmailStr
     first_name: str
@@ -20,25 +22,21 @@ class UserBase(BaseModel):
     role: UserRole = UserRole.STORE_STAFF
     branch_id: Optional[UUID] = None
 
-   # Used when Admin sends the invite. NO password required here
+
 class UserInvite(UserBase):
     pass
 
 
-
-# ---  PASSWORD SETUP SCHEMA (New!) ---
-# Used when the User clicks the email link to set their password.
 class PasswordSetup(BaseModel):
     token: str
     new_password: str
 
+
 class UserCreate(UserBase):
     password: str
 
-# Properties to return to client
-class UserResponse(UserBase): 
-    
-    # Keep the rest as is
+
+class UserResponse(BaseModel):
     user_id: UUID
     email: EmailStr
     first_name: Optional[str] = None
@@ -46,27 +44,37 @@ class UserResponse(UserBase):
     role: str
     is_active: bool
     branch_id: Optional[str] = None
-    
+
+    class Config:
+        from_attributes = True
+
+
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
+
 
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str
 
-    
+
 class UserProfile(BaseModel):
     user_id: str
     email: EmailStr
     first_name: str
     last_name: str
     role: UserRole
-    branch_name: Optional[str] = "Headquarters" # Friendly name!
+    branch_name: Optional[str] = "Headquarters"
 
-@field_validator('user_id', mode='before')
-@classmethod
-def convert_id(cls, v: Any):
+    # ✅ FIXED: field_validator is now correctly INSIDE the class
+    @field_validator('user_id', mode='before')
+    @classmethod
+    def convert_id(cls, v: Any) -> str:
         return str(v)
+
+    class Config:
+        from_attributes = True
+
 
 class UserUpdate(BaseModel):
     first_name: Optional[str] = None
@@ -74,6 +82,3 @@ class UserUpdate(BaseModel):
     role: Optional[UserRole] = None
     branch_id: Optional[str] = None
     is_active: Optional[bool] = None
-    
-class Config:
-        from_attributes = True
