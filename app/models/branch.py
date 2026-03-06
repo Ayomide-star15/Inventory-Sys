@@ -7,7 +7,6 @@ from datetime import datetime
 class Branch(Document):
     id: UUID = Field(default_factory=uuid4)
     
-    # We use Indexed(unique=True) to prevent duplicate branch codes
     name: str = Indexed(unique=True)
     code: str = Indexed(unique=True)
     address: str
@@ -15,12 +14,14 @@ class Branch(Document):
     
     zones: List[str] = ["Receiving", "Back Store", "Sales Floor", "Checkout"]
     
-    # NOTICE: We use UUID, not the 'User' class here. 
-    # This prevents the circular import error.
     manager_id: Optional[UUID] = None
     
+    # ADDED: Soft-delete support — never hard-delete a branch
+    is_active: bool = True
+    
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: Optional[datetime] = None
+    # FIXED: Was Optional[datetime] = None — now has a proper default
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Settings:
         name = "branches"
