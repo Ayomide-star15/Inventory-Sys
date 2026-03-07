@@ -31,7 +31,7 @@ class PurchaseOrder(Document):
     
     # Workflow timestamps
     created_by: UUID
-    created_at: datetime = datetime.utcnow()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
     approved_by: Optional[UUID] = None
     received_at: Optional[datetime] = None
     

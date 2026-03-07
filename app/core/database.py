@@ -1,6 +1,8 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
 from app.core.config import settings
+from app.models.system_settings import SystemSettings
+from app.models.audit_log import AuditLog
 from app.models.user import User
 from app.models.branch import Branch
 from app.models.category import Category
@@ -11,6 +13,7 @@ from app.models.inventory import Inventory, AdjustmentLog
 from app.models.stock_transfer import StockTransfer
 from app.models.sale import Sale
 from app.models.price_history import PriceHistory  # ← ADD THIS
+from app.models.system_settings import SystemSettings  # ← ADD THIS
 
 async def init_db():
     """Connect to MongoDB and initialize Beanie"""
@@ -30,7 +33,9 @@ async def init_db():
             AdjustmentLog, 
             StockTransfer, 
             Sale,
-            PriceHistory  # ← ADD THIS
+            PriceHistory,  # ← ADD THIS
+            AuditLog,  # ← ADD THIS
+            SystemSettings  # ← ADD THIS
         ]
     )
     

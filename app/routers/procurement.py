@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Request
 from datetime import datetime
 from uuid import UUID
 from typing import List
@@ -8,11 +8,20 @@ from app.models.inventory import Inventory
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.branch import Branch
-from app.schemas.procurement import POCreateSchema, ReceiveGoodsSchema, POItemResponse
+from app.models.system_settings import SystemSettings
+from app.schemas.procurement import POCreateSchema, ReceiveGoodsSchema
 from app.dependencies.auth import get_current_user
 from app.models.user import User, UserRole
+from app.models.audit_log import AuditAction, AuditModule
+from app.utils.audit import log_action
+from app.utils.security import extract_ip
 
 router = APIRouter(prefix="/procurement", tags=["Procurement"])
+
+
+async def get_settings() -> SystemSettings:
+    s = await SystemSettings.find_one({})
+    return s if s else SystemSettings()
 
 
 # ==========================================
@@ -21,33 +30,25 @@ router = APIRouter(prefix="/procurement", tags=["Procurement"])
 @router.post("/create", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_po(
     data: POCreateSchema,
+    request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Create a new Purchase Order.
-    Only Purchase Managers can create POs.
-
-    Workflow:
-    - If total < $5,000: Auto-approved and sent to supplier
-    - If total >= $5,000: Pending Finance Manager approval
-    """
-
     if current_user.role != UserRole.PURCHASE:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access Denied: Only Purchase Managers can create Purchase Orders"
-        )
+        raise HTTPException(status_code=403, detail="Access Denied: Only Purchase Managers can create Purchase Orders")
 
     supplier = await Supplier.get(data.supplier_id)
     if not supplier:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found")
-
+        raise HTTPException(status_code=404, detail="Supplier not found")
     if not supplier.is_active:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot create PO for inactive supplier")
+        raise HTTPException(status_code=400, detail="Cannot create PO for inactive supplier")
 
     branch = await Branch.get(data.target_branch)
     if not branch:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target branch not found")
+        raise HTTPException(status_code=404, detail="Target branch not found")
+
+    # ✅ Get threshold from system settings
+    sys_settings = await get_settings()
+    threshold = sys_settings.po_approval_threshold
 
     po_items = []
     total_amount = 0.0
@@ -55,7 +56,7 @@ async def create_po(
     for item in data.items:
         product = await Product.get(item.product_id)
         if not product:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Product {item.product_id} not found")
+            raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
 
         line_cost = item.quantity * item.unit_cost
         total_amount += line_cost
@@ -68,12 +69,12 @@ async def create_po(
             total_cost=line_cost
         ))
 
-    if total_amount < 5000:
+    if total_amount < threshold:
         status_value = POStatus.SENT
-        message = "PO created and automatically sent to supplier (under $5,000)"
+        message = f"PO created and automatically sent to supplier (under {sys_settings.currency_symbol}{threshold:,.0f})"
     else:
         status_value = POStatus.PENDING_APPROVAL
-        message = "PO created. Awaiting Finance Manager approval (over $5,000)"
+        message = f"PO created. Awaiting Finance Manager approval (over {sys_settings.currency_symbol}{threshold:,.0f})"
 
     po = PurchaseOrder(
         supplier_id=data.supplier_id,
@@ -86,12 +87,29 @@ async def create_po(
     )
     await po.insert()
 
+    await log_action(
+        user=current_user,
+        action=AuditAction.PO_CREATED,
+        module=AuditModule.PROCUREMENT,
+        description=f"Created PO for {supplier.name} — {sys_settings.currency_symbol}{total_amount:,.2f} → {branch.name}",
+        target_id=str(po.id),
+        target_type="purchase_order",
+        metadata={
+            "total_amount": total_amount,
+            "supplier": supplier.name,
+            "branch": branch.name,
+            "status": status_value,
+            "items_count": len(po_items)
+        },
+        ip_address=extract_ip(request)
+    )
+
     return {
         "message": message,
         "po_id": str(po.id),
         "total_amount": total_amount,
         "status": status_value,
-        "requires_approval": total_amount >= 5000
+        "requires_approval": total_amount >= threshold
     }
 
 
@@ -99,22 +117,37 @@ async def create_po(
 # 2. APPROVE PURCHASE ORDER
 # ==========================================
 @router.put("/{po_id}/approve", response_model=dict)
-async def approve_po(po_id: UUID, current_user: User = Depends(get_current_user)):
-    """Approve a high-value Purchase Order. Only Finance Managers can approve."""
-
+async def approve_po(
+    po_id: UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access Denied: Only Finance Managers can approve orders")
+        raise HTTPException(status_code=403, detail="Access Denied: Only Finance Managers can approve orders")
 
     po = await PurchaseOrder.get(po_id)
     if not po:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Purchase Order not found")
+        raise HTTPException(status_code=404, detail="Purchase Order not found")
 
     if po.status != POStatus.PENDING_APPROVAL:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Cannot approve. Current status is '{po.status}'")
+        raise HTTPException(status_code=400, detail=f"Cannot approve. Current status is '{po.status}'")
 
     po.status = POStatus.APPROVED
     po.approved_by = current_user.user_id
     await po.save()
+
+    supplier = await Supplier.get(po.supplier_id)
+
+    await log_action(
+        user=current_user,
+        action=AuditAction.PO_APPROVED,
+        module=AuditModule.PROCUREMENT,
+        description=f"Approved PO worth ₦{po.total_amount:,.2f} from {supplier.name if supplier else 'Unknown'}",
+        target_id=str(po.id),
+        target_type="purchase_order",
+        metadata={"total_amount": po.total_amount, "supplier": supplier.name if supplier else None},
+        ip_address=extract_ip(request)
+    )
 
     return {
         "message": "Purchase Order approved successfully",
@@ -128,128 +161,136 @@ async def approve_po(po_id: UUID, current_user: User = Depends(get_current_user)
 # 3. REJECT PURCHASE ORDER
 # ==========================================
 @router.put("/{po_id}/reject", response_model=dict)
-async def reject_po(po_id: UUID, current_user: User = Depends(get_current_user)):
-    """Reject a Purchase Order. Only Finance Managers can reject."""
-
+async def reject_po(
+    po_id: UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access Denied: Only Finance Managers can reject orders")
+        raise HTTPException(status_code=403, detail="Access Denied: Only Finance Managers can reject orders")
 
     po = await PurchaseOrder.get(po_id)
     if not po:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Purchase Order not found")
+        raise HTTPException(status_code=404, detail="Purchase Order not found")
 
     if po.status != POStatus.PENDING_APPROVAL:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only pending orders can be rejected")
+        raise HTTPException(status_code=400, detail="Only pending orders can be rejected")
 
     po.status = POStatus.REJECTED
     await po.save()
+
+    supplier = await Supplier.get(po.supplier_id)
+
+    await log_action(
+        user=current_user,
+        action=AuditAction.PO_REJECTED,
+        module=AuditModule.PROCUREMENT,
+        description=f"Rejected PO worth ₦{po.total_amount:,.2f} from {supplier.name if supplier else 'Unknown'}",
+        target_id=str(po.id),
+        target_type="purchase_order",
+        metadata={"total_amount": po.total_amount},
+        ip_address=extract_ip(request)
+    )
 
     return {"message": "Purchase Order rejected", "po_id": str(po.id), "status": po.status}
 
 
 # ==========================================
-# 4. RECEIVE GOODS — COPIES selling_price FROM PRODUCT
+# 4. RECEIVE GOODS
 # ==========================================
 @router.post("/{po_id}/receive", response_model=dict)
 async def receive_goods(
     po_id: UUID,
     data: ReceiveGoodsSchema,
+    request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Receive goods from a Purchase Order.
-
-    - Updates inventory quantity at the target branch.
-    - ✅ Copies selling_price from Product into the Inventory record so
-      Sales Staff always read price from Inventory, never directly from Product.
-
-    Only Store Staff from the TARGET BRANCH can receive goods.
-    """
-
     if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access Denied: Only Store Staff can receive goods")
+        raise HTTPException(status_code=403, detail="Access Denied: Only Store Staff can receive goods")
 
     po = await PurchaseOrder.get(po_id)
     if not po:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Purchase Order not found")
+        raise HTTPException(status_code=404, detail="Purchase Order not found")
 
     if not current_user.branch_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Your account is not assigned to a branch")
+        raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
 
     if str(po.target_branch) != str(current_user.branch_id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access Denied: This order is for another branch."
-        )
+        raise HTTPException(status_code=403, detail="Access Denied: This order is for another branch.")
 
     if po.status not in [POStatus.SENT, POStatus.APPROVED]:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=400,
             detail=f"Cannot receive goods. PO status is '{po.status}'. Must be 'Sent' or 'Approved'"
         )
 
+    received_items_summary = []
+
     for received_item in data.items:
-        # Find matching PO line item
         po_item = next(
             (item for item in po.items if str(item.product_id) == str(received_item.product_id)),
             None
         )
         if not po_item:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Product {received_item.product_id} not found in this PO"
-            )
+            raise HTTPException(status_code=400, detail=f"Product {received_item.product_id} not found in this PO")
 
         po_item.received_quantity += received_item.received_qty
 
         product_id_str = str(received_item.product_id)
         branch_id_str = str(po.target_branch)
 
-        # Fetch product — we need name, threshold AND selling price
         product = await Product.get(received_item.product_id)
         if not product:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Product {received_item.product_id} not found in database"
-            )
+            raise HTTPException(status_code=404, detail=f"Product {received_item.product_id} not found")
 
-        # ✅ The selling price to stamp on inventory is whatever the Purchase Manager
-        #    set on the Product at the time of receiving — global, consistent price.
         selling_price = product.price
 
         inventory = await Inventory.find_one({
-    "product_id": product_id_str,
-    "branch_id": branch_id_str
-})
-        
+            "product_id": product_id_str,
+            "branch_id": branch_id_str
+        })
 
         if inventory:
-            # Update quantity AND refresh selling_price in case PM changed it since last delivery
             inventory.quantity += received_item.received_qty
-            inventory.selling_price = selling_price  # ✅ Always sync to latest Product price
+            inventory.selling_price = selling_price
             inventory.updated_at = datetime.utcnow()
             await inventory.save()
-
-            print(f"✅ Updated inventory: {product.name} | +{received_item.received_qty} units | price: ₦{selling_price}")
         else:
-            # First time this product arrives at this branch — create inventory record
             new_inv = Inventory(
                 product_id=product_id_str,
                 branch_id=branch_id_str,
                 quantity=received_item.received_qty,
                 product_name=product.name,
-                selling_price=selling_price,       # ✅ Copied from Product.price
+                selling_price=selling_price,
                 reorder_point=product.low_stock_threshold,
                 updated_at=datetime.utcnow()
             )
             await new_inv.insert()
 
-            print(f"✅ Created inventory: {product.name} | {received_item.received_qty} units | price: ₦{selling_price}")
+        received_items_summary.append(f"{product.name} x{received_item.received_qty}")
 
     po.status = POStatus.RECEIVED
     po.receiving_notes = data.notes
     po.received_at = datetime.utcnow()
     await po.save()
+
+    branch = await Branch.get(po.target_branch)
+
+    await log_action(
+        user=current_user,
+        action=AuditAction.PO_RECEIVED,
+        module=AuditModule.PROCUREMENT,
+        description=f"Received goods for PO at {branch.name if branch else 'Unknown'}: {', '.join(received_items_summary)}",
+        target_id=str(po.id),
+        target_type="purchase_order",
+        metadata={
+            "items_received": len(data.items),
+            "branch": branch.name if branch else None,
+            "items": received_items_summary
+        },
+        branch_name=branch.name if branch else None,
+        ip_address=extract_ip(request)
+    )
 
     return {
         "message": "Goods received and inventory updated successfully",
@@ -264,14 +305,17 @@ async def receive_goods(
 # ==========================================
 @router.get("/", response_model=List[dict])
 async def get_purchase_orders(
-    status: POStatus = None,
+    po_status: POStatus = None,
+    page: int = 1,
+    limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
     query = PurchaseOrder.find_all()
-    if status:
-        query = PurchaseOrder.find(PurchaseOrder.status == status)
+    if po_status:
+        query = PurchaseOrder.find(PurchaseOrder.status == po_status)
 
-    orders = await query.to_list()
+    skip = (page - 1) * limit
+    orders = await query.skip(skip).limit(limit).to_list()
 
     return [
         {
@@ -296,35 +340,24 @@ async def get_purchase_order(
     po_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Access Control:
-    - Admin / Finance / Purchase Manager: any PO
-    - Store Manager: only POs for their branch
-    - Store Staff: only POs for their branch that are Sent/Approved
-    - Sales Staff: denied
-    """
-
     po = await PurchaseOrder.get(po_id)
     if not po:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Purchase Order not found")
+        raise HTTPException(status_code=404, detail="Purchase Order not found")
 
     role = current_user.role
 
     if role in [UserRole.ADMIN, UserRole.FINANCE, UserRole.PURCHASE]:
-        pass  # Full access
-
+        pass
     elif role == UserRole.STORE_MANAGER:
         if not current_user.branch_id or str(po.target_branch) != str(current_user.branch_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only view POs for your branch")
-
+            raise HTTPException(status_code=403, detail="You can only view POs for your branch")
     elif role == UserRole.STORE_STAFF:
         if not current_user.branch_id or str(po.target_branch) != str(current_user.branch_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This order is not for your branch")
+            raise HTTPException(status_code=403, detail="This order is not for your branch")
         if po.status not in [POStatus.SENT, POStatus.APPROVED]:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Order not ready for receiving. Status: {po.status}")
-
+            raise HTTPException(status_code=403, detail=f"Order not ready for receiving. Status: {po.status}")
     else:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to view Purchase Orders")
+        raise HTTPException(status_code=403, detail="You do not have permission to view Purchase Orders")
 
     supplier = await Supplier.get(po.supplier_id)
     branch = await Branch.get(po.target_branch)
@@ -339,7 +372,6 @@ async def get_purchase_order(
             "received_quantity": item.received_quantity,
             "unit_cost": item.unit_cost,
             "total_cost": item.total_cost,
-            # ✅ Show the current selling price so staff know what price will land on inventory
             "selling_price": product.price if product else None
         })
 
@@ -365,9 +397,8 @@ async def get_purchase_order(
 # ==========================================
 @router.get("/pending/approvals", response_model=List[dict])
 async def get_pending_approvals(current_user: User = Depends(get_current_user)):
-
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access Denied")
+        raise HTTPException(status_code=403, detail="Access Denied")
 
     pending_orders = await PurchaseOrder.find(PurchaseOrder.status == POStatus.PENDING_APPROVAL).to_list()
 

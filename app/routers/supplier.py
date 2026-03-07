@@ -1,46 +1,54 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Request
 from typing import List
 from uuid import UUID
 from datetime import datetime
 
 from app.models.supplier import Supplier
+from app.models.purchase_order import PurchaseOrder, POStatus
 from app.schemas.supplier import SupplierCreate, SupplierUpdate, SupplierResponse
 from app.models.user import User
 from app.dependencies.auth import get_product_manager
+from app.models.audit_log import AuditAction, AuditModule
+from app.utils.audit import log_action
+from app.utils.security import extract_ip
 
 router = APIRouter()
 
-# ---------------------------------------------------------
-# ➕ CREATE A SUPPLIER
-# ---------------------------------------------------------
+
 @router.post("/", response_model=SupplierResponse, status_code=status.HTTP_201_CREATED)
 async def create_supplier(
-    supplier_data: SupplierCreate, 
-    manager: User = Depends(get_product_manager) # Only Managers/Admins
-):
-    # Check if name already exists
-    if await Supplier.find_one(Supplier.name == supplier_data.name):
-        raise HTTPException(400, "Supplier with this name already exists")
-    
-    new_supplier = Supplier(**supplier_data.dict())
-    await new_supplier.save()
-    return new_supplier
-
-# ---------------------------------------------------------
-# 📜 GET ALL SUPPLIERS
-# ---------------------------------------------------------
-@router.get("/", response_model=List[SupplierResponse])
-async def get_suppliers(
+    request: Request,
+    supplier_data: SupplierCreate,
     manager: User = Depends(get_product_manager)
 ):
+    if await Supplier.find_one(Supplier.name == supplier_data.name):
+        raise HTTPException(400, "Supplier with this name already exists")
+
+    new_supplier = Supplier(**supplier_data.dict())
+    await new_supplier.save()
+
+    await log_action(
+        user=manager,
+        action=AuditAction.SUPPLIER_CREATED,
+        module=AuditModule.SUPPLIERS,
+        description=f"Created supplier: {new_supplier.name}",
+        target_id=str(new_supplier.id),
+        target_type="supplier",
+        metadata={"name": new_supplier.name, "phone": new_supplier.phone},
+        ip_address=extract_ip(request)
+    )
+
+    return new_supplier
+
+
+@router.get("/", response_model=List[SupplierResponse])
+async def get_suppliers(manager: User = Depends(get_product_manager)):
     return await Supplier.find_all().to_list()
 
-# ---------------------------------------------------------
-# 🔍 GET ONE SUPPLIER
-# ---------------------------------------------------------
+
 @router.get("/{supplier_id}", response_model=SupplierResponse)
 async def get_supplier(
-    supplier_id: UUID, 
+    supplier_id: UUID,
     manager: User = Depends(get_product_manager)
 ):
     supplier = await Supplier.get(supplier_id)
@@ -48,38 +56,78 @@ async def get_supplier(
         raise HTTPException(404, "Supplier not found")
     return supplier
 
-# ---------------------------------------------------------
-# ✏️ UPDATE SUPPLIER
-# ---------------------------------------------------------
+
 @router.put("/{supplier_id}", response_model=SupplierResponse)
 async def update_supplier(
-    supplier_id: UUID, 
-    update_data: SupplierUpdate, 
+    supplier_id: UUID,
+    update_data: SupplierUpdate,
+    request: Request,
     manager: User = Depends(get_product_manager)
 ):
     supplier = await Supplier.get(supplier_id)
     if not supplier:
         raise HTTPException(404, "Supplier not found")
-    
-    # Update fields
+
     data_dict = update_data.dict(exclude_unset=True)
     data_dict["updated_at"] = datetime.utcnow()
-    
+
+    old_data = {k: getattr(supplier, k, None) for k in data_dict.keys() if k != "updated_at"}
+
     await supplier.update({"$set": data_dict})
+
+    await log_action(
+        user=manager,
+        action=AuditAction.SUPPLIER_UPDATED,
+        module=AuditModule.SUPPLIERS,
+        description=f"Updated supplier: {supplier.name}",
+        target_id=str(supplier_id),
+        target_type="supplier",
+        metadata={"changes": data_dict, "previous": old_data},
+        ip_address=extract_ip(request)
+    )
+
     return await Supplier.get(supplier_id)
 
-# ---------------------------------------------------------
-# 🗑️ DELETE SUPPLIER
-# ---------------------------------------------------------
+
 @router.delete("/{supplier_id}")
 async def delete_supplier(
-    supplier_id: UUID, 
+    supplier_id: UUID,
+    request: Request,
     manager: User = Depends(get_product_manager)
 ):
     supplier = await Supplier.get(supplier_id)
     if not supplier:
         raise HTTPException(404, "Supplier not found")
-    
-    # Note: Later, we will block this if they have active Purchase Orders!
+
+    # ✅ FIXED: Block deletion if active POs exist
+    active_pos = await PurchaseOrder.find({
+        "supplier_id": supplier_id,
+        "status": {"$nin": [
+            POStatus.RECEIVED,
+            POStatus.CANCELLED,
+            POStatus.REJECTED
+        ]}
+    }).count()
+
+    if active_pos > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete supplier. They have {active_pos} active Purchase Order(s). "
+                   f"Please complete or cancel them first."
+        )
+
+    supplier_name = supplier.name
     await supplier.delete()
-    return {"message": "Supplier deleted successfully"}
+
+    await log_action(
+        user=manager,
+        action=AuditAction.SUPPLIER_DELETED,
+        module=AuditModule.SUPPLIERS,
+        description=f"Deleted supplier: {supplier_name}",
+        target_id=str(supplier_id),
+        target_type="supplier",
+        metadata={"name": supplier_name},
+        ip_address=extract_ip(request)
+    )
+
+    return {"message": f"Supplier '{supplier_name}' deleted successfully"}

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Request
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime, timedelta
@@ -9,12 +9,12 @@ from app.models.inventory import Inventory
 from app.models.category import Category
 from app.models.branch import Branch
 from app.models.user import User, UserRole
-from app.schemas.sale import (
-    SaleCreate,
-    SaleCancelRequest,
-    ProductInventoryResponse,
-)
+from app.models.system_settings import SystemSettings
+from app.schemas.sale import SaleCreate, SaleCancelRequest, ProductInventoryResponse
 from app.dependencies.auth import get_current_user
+from app.models.audit_log import AuditAction, AuditModule
+from app.utils.audit import log_action
+from app.utils.security import extract_ip
 
 router = APIRouter()
 
@@ -26,8 +26,16 @@ def generate_sale_number(branch_code: str) -> str:
     return f"SALE-{branch_code}-{timestamp}-{random_suffix}"
 
 
+async def get_settings() -> SystemSettings:
+    """Get system settings or return defaults"""
+    s = await SystemSettings.find_one({})
+    if not s:
+        return SystemSettings()
+    return s
+
+
 # ==========================================
-# 1. VIEW PRODUCTS WITH INVENTORY (For Sales Staff)
+# 1. VIEW PRODUCTS WITH INVENTORY
 # ==========================================
 
 @router.get("/products", response_model=List[ProductInventoryResponse])
@@ -61,8 +69,7 @@ async def get_products_for_sale(
         inventory = await Inventory.find_one({
             "product_id": str(product.id),
             "branch_id": str(current_user.branch_id)
-})
-
+        })
         if inventory and inventory.quantity > 0:
             category = await Category.get(product.category_id)
             result.append({
@@ -70,7 +77,6 @@ async def get_products_for_sale(
                 "name": product.name,
                 "sku": product.sku,
                 "barcode": product.barcode,
-                # ✅ Use selling_price from Inventory, not price from Product
                 "price": inventory.selling_price,
                 "category_name": category.name if category else "Unknown",
                 "available_quantity": inventory.quantity,
@@ -81,7 +87,7 @@ async def get_products_for_sale(
 
 
 # ==========================================
-# 2. SEARCH PRODUCT BY BARCODE
+# 2. SEARCH BY BARCODE
 # ==========================================
 
 @router.get("/products/barcode/{barcode}", response_model=ProductInventoryResponse)
@@ -97,7 +103,7 @@ async def search_product_by_barcode(
 
     product = await Product.find_one(Product.barcode == barcode)
     if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Product with barcode '{barcode}' not found")
+        raise HTTPException(status_code=404, detail=f"Product with barcode '{barcode}' not found")
 
     inventory = await Inventory.find_one({
         "product_id": str(product.id),
@@ -105,7 +111,7 @@ async def search_product_by_barcode(
     })
 
     if not inventory or inventory.quantity <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"'{product.name}' is out of stock at your branch")
+        raise HTTPException(status_code=400, detail=f"'{product.name}' is out of stock at your branch")
 
     category = await Category.get(product.category_id)
 
@@ -114,7 +120,6 @@ async def search_product_by_barcode(
         "name": product.name,
         "sku": product.sku,
         "barcode": product.barcode,
-        # ✅ Use selling_price from Inventory
         "price": inventory.selling_price,
         "category_name": category.name if category else "Unknown",
         "available_quantity": inventory.quantity,
@@ -129,19 +134,23 @@ async def search_product_by_barcode(
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_sale(
     sale_data: SaleCreate,
+    request: Request,
     current_user: User = Depends(get_current_user)
 ):
     if current_user.role not in [UserRole.SALES_STAFF, UserRole.STORE_MANAGER]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access Denied: Only Sales Staff can create sales")
+        raise HTTPException(status_code=403, detail="Access Denied: Only Sales Staff can create sales")
 
     if not current_user.branch_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Your account is not assigned to a branch")
+        raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
+
+    # ✅ Get VAT rate from system settings instead of hardcoded value
+    sys_settings = await get_settings()
+    vat_rate = sys_settings.vat_rate
 
     branch_id_str = str(current_user.branch_id)
-
     branch = await Branch.get(current_user.branch_id)
     if not branch:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Branch not found")
+        raise HTTPException(status_code=404, detail="Branch not found")
 
     sale_items = []
     subtotal = 0.0
@@ -149,31 +158,30 @@ async def create_sale(
     for item in sale_data.items:
         product = await Product.get(item.product_id)
         if not product:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Product {item.product_id} not found")
+            raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
 
         inventory = await Inventory.find_one({
-    "product_id": str(item.product_id),
-    "branch_id": branch_id_str
-})
+            "product_id": str(item.product_id),
+            "branch_id": branch_id_str
+        })
+
         if not inventory:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"'{product.name}' is not available at your branch. Stock must be received first."
+                status_code=404,
+                detail=f"'{product.name}' is not available at your branch."
             )
 
         if inventory.quantity < item.quantity:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=400,
                 detail=f"Insufficient stock for '{product.name}'. Available: {inventory.quantity}, Requested: {item.quantity}"
             )
 
-        # ✅ Use selling_price from Inventory — this is the price the PM stamped
-        #    when goods were received, not the raw Product.price
         unit_price = inventory.selling_price
         if unit_price <= 0:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Selling price for '{product.name}' has not been set on inventory. Please contact your Purchase Manager."
+                status_code=400,
+                detail=f"Selling price for '{product.name}' has not been set. Contact your Purchase Manager."
             )
 
         line_total = item.quantity * unit_price
@@ -185,21 +193,21 @@ async def create_sale(
             sku=product.sku,
             barcode=product.barcode,
             quantity_sold=item.quantity,
-            unit_price=unit_price,      # ✅ From Inventory, not Product
+            unit_price=unit_price,
             line_total=line_total
         ))
 
-    # Calculate totals
-    tax = subtotal * 0.075  # 7.5% VAT
+    # ✅ Use dynamic VAT rate
+    tax = subtotal * vat_rate
     total_amount = subtotal + tax - sale_data.discount
 
     if sale_data.discount > subtotal:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Discount cannot exceed subtotal")
+        raise HTTPException(status_code=400, detail="Discount cannot exceed subtotal")
 
     if sale_data.amount_paid < total_amount:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Insufficient payment. Total: ₦{total_amount:.2f}, Paid: ₦{sale_data.amount_paid:.2f}"
+            status_code=400,
+            detail=f"Insufficient payment. Total: {sys_settings.currency_symbol}{total_amount:.2f}, Paid: {sys_settings.currency_symbol}{sale_data.amount_paid:.2f}"
         )
 
     change_given = sale_data.amount_paid - total_amount
@@ -226,13 +234,31 @@ async def create_sale(
     # Deduct inventory
     for item in sale_data.items:
         inventory = await Inventory.find_one({
-    "product_id": str(item.product_id),
-    "branch_id": branch_id_str
-})
+            "product_id": str(item.product_id),
+            "branch_id": branch_id_str
+        })
         if inventory:
             inventory.quantity -= item.quantity
             inventory.updated_at = datetime.utcnow()
             await inventory.save()
+
+    await log_action(
+        user=current_user,
+        action=AuditAction.SALE_COMPLETED,
+        module=AuditModule.SALES,
+        description=f"Completed sale {sale_number} — {sys_settings.currency_symbol}{total_amount:,.2f} ({sale_data.payment_method.value})",
+        target_id=str(new_sale.id),
+        target_type="sale",
+        metadata={
+            "sale_number": sale_number,
+            "total_amount": total_amount,
+            "items_count": len(sale_items),
+            "payment_method": sale_data.payment_method.value,
+            "branch": branch.name
+        },
+        branch_name=branch.name,
+        ip_address=extract_ip(request)
+    )
 
     return {
         "message": "Sale completed successfully",
@@ -255,16 +281,16 @@ async def create_sale(
 async def get_sale_details(sale_id: UUID, current_user: User = Depends(get_current_user)):
     sale = await Sale.get(sale_id)
     if not sale:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found")
+        raise HTTPException(status_code=404, detail="Sale not found")
 
     if current_user.role == UserRole.SALES_STAFF:
         if sale.sold_by != current_user.user_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only view your own sales")
+            raise HTTPException(status_code=403, detail="You can only view your own sales")
     elif current_user.role == UserRole.STORE_MANAGER:
         if str(sale.branch_id) != str(current_user.branch_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only view sales from your branch")
+            raise HTTPException(status_code=403, detail="You can only view sales from your branch")
     elif current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        raise HTTPException(status_code=403, detail="Access denied")
 
     branch = await Branch.get(sale.branch_id)
     cashier = await User.find_one(User.user_id == sale.sold_by)
@@ -308,6 +334,8 @@ async def list_sales(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     payment_method: Optional[PaymentMethod] = None,
+    page: int = 1,
+    limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
     query = {}
@@ -316,10 +344,10 @@ async def list_sales(
         query["sold_by"] = current_user.user_id
     elif current_user.role == UserRole.STORE_MANAGER:
         if not current_user.branch_id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Your account is not assigned to a branch")
+            raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
         query["branch_id"] = current_user.branch_id
     elif current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        raise HTTPException(status_code=403, detail="Access denied")
 
     if start_date:
         query["created_at"] = {"$gte": start_date}
@@ -328,7 +356,8 @@ async def list_sales(
     if payment_method:
         query["payment_method"] = payment_method
 
-    sales = await Sale.find(query).sort(-Sale.created_at).limit(100).to_list()  # type: ignore
+    skip = (page - 1) * limit
+    sales = await Sale.find(query).sort(-Sale.created_at).skip(skip).limit(limit).to_list()  # type: ignore
 
     result = []
     for sale in sales:
@@ -356,10 +385,10 @@ async def list_sales(
 @router.get("/my-branch/today", response_model=dict)
 async def get_todays_sales(current_user: User = Depends(get_current_user)):
     if current_user.role not in [UserRole.SALES_STAFF, UserRole.STORE_MANAGER]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        raise HTTPException(status_code=403, detail="Access denied")
 
     if not current_user.branch_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Your account is not assigned to a branch")
+        raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
 
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
@@ -395,27 +424,28 @@ async def get_todays_sales(current_user: User = Depends(get_current_user)):
 async def cancel_sale(
     sale_id: UUID,
     cancel_data: SaleCancelRequest,
+    request: Request,
     current_user: User = Depends(get_current_user)
 ):
     if current_user.role not in [UserRole.STORE_MANAGER, UserRole.ADMIN]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Store Managers and Admins can cancel sales")
+        raise HTTPException(status_code=403, detail="Only Store Managers and Admins can cancel sales")
 
     sale = await Sale.get(sale_id)
     if not sale:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found")
+        raise HTTPException(status_code=404, detail="Sale not found")
 
     if sale.status != SaleStatus.COMPLETED:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Cannot cancel. Sale status is '{sale.status}'")
+        raise HTTPException(status_code=400, detail=f"Cannot cancel. Sale status is '{sale.status}'")
 
     if current_user.role == UserRole.STORE_MANAGER:
         if str(sale.branch_id) != str(current_user.branch_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only cancel sales from your branch")
+            raise HTTPException(status_code=403, detail="You can only cancel sales from your branch")
 
-    # Return items to inventory
+    # ✅ FIXED: Use sale.branch_id not current_user.branch_id
     for item in sale.items:
         inventory = await Inventory.find_one({
             "product_id": str(item.product_id),
-            "branch_id": str(current_user.branch_id)
+            "branch_id": str(sale.branch_id)  # ✅ Was current_user.branch_id — now fixed
         })
         if inventory:
             inventory.quantity += item.quantity_sold
@@ -427,6 +457,25 @@ async def cancel_sale(
     sale.cancelled_at = datetime.utcnow()
     sale.cancellation_reason = cancel_data.cancellation_reason
     await sale.save()
+
+    branch = await Branch.get(sale.branch_id)
+
+    await log_action(
+        user=current_user,
+        action=AuditAction.SALE_CANCELLED,
+        module=AuditModule.SALES,
+        description=f"Cancelled sale {sale.sale_number} — ₦{sale.total_amount:,.2f}. Reason: {cancel_data.cancellation_reason}",
+        target_id=str(sale.id),
+        target_type="sale",
+        metadata={
+            "sale_number": sale.sale_number,
+            "total_amount": sale.total_amount,
+            "cancellation_reason": cancel_data.cancellation_reason,
+            "branch": branch.name if branch else "Unknown"
+        },
+        branch_name=branch.name if branch else None,
+        ip_address=extract_ip(request)
+    )
 
     return {
         "message": "Sale cancelled successfully",

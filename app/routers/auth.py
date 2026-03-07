@@ -1,30 +1,41 @@
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.security import OAuth2PasswordRequestForm
+from datetime import datetime
 from app.models.user import User
 from app.core.security import verify_password, create_access_token
+from app.models.audit_log import AuditAction, AuditModule
+from app.utils.audit import log_action
+from app.utils.security import extract_ip, mask_email
 
 router = APIRouter()
 
 
 @router.post("/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends()
+):
     """
     Login with email + password.
     Returns a JWT bearer token.
+    Records login attempt in audit log.
     """
+    ip = extract_ip(request)
 
-    # 1. Find user by email (form username field = email)
+    # 1. Find user by email
     user = await User.find_one(User.email == form_data.username)
 
-    # 2. Check user exists and password matches
+    # 2. User not found
     if not user:
+        # Log failed attempt without exposing user existence
+        print(f"⚠️ Failed login attempt for {mask_email(form_data.username)} from {ip}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # ✅ Guard: account was invited but password never set yet
+    # 3. Account invited but password never set
     if not user.hashed_password:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -32,14 +43,24 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # 4. Wrong password
     if not verify_password(form_data.password, user.hashed_password):
+        # ✅ Log failed login
+        await log_action(
+            user=user,
+            action=AuditAction.LOGIN_FAILED,
+            module=AuditModule.AUTH,
+            description=f"Failed login attempt for {user.email}",
+            ip_address=ip,
+            metadata={"email": user.email}
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 3. Check account is active
+    # 5. Inactive account
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -47,8 +68,22 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 4. ✅ sub = email (MUST match what get_current_user() expects to decode)
+    # 6. ✅ Update last_login timestamp
+    user.last_login = datetime.utcnow()
+    await user.save()
+
+    # 7. Generate token
     access_token = create_access_token(data={"sub": user.email, "type": "access"})
+
+    # 8. ✅ Log successful login
+    await log_action(
+        user=user,
+        action=AuditAction.LOGIN,
+        module=AuditModule.AUTH,
+        description=f"{user.first_name} {user.last_name} logged in as {user.role.value}",
+        ip_address=ip,
+        metadata={"role": user.role.value}
+    )
 
     return {
         "access_token": access_token,
