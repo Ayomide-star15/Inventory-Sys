@@ -60,7 +60,7 @@ async def get_admin_user(
     if current_user.role != UserRole.ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="⚠️ Access Denied: Only System Administrators can perform this action."
+            detail="Access Denied: Only System Administrators can perform this action."
         )
     return current_user
 

@@ -21,6 +21,7 @@ async def create_supplier(
     supplier_data: SupplierCreate,
     manager: User = Depends(get_product_manager)
 ):
+    """Product Manager only.** Creates a new supplier. Validates that a supplier with the same name does not already exist. Logs the creation action with details about the new supplier."""
     if await Supplier.find_one(Supplier.name == supplier_data.name):
         raise HTTPException(400, "Supplier with this name already exists")
 
@@ -45,12 +46,16 @@ async def create_supplier(
 async def get_suppliers(manager: User = Depends(get_product_manager)):
     return await Supplier.find_all().to_list()
 
+"Admin and Purchase Manager only.** Returns all suppliers. Use `?active=true` to filter active suppliers only."
+
 
 @router.get("/{supplier_id}", response_model=SupplierResponse)
 async def get_supplier(
     supplier_id: UUID,
     manager: User = Depends(get_product_manager)
 ):
+    
+
     supplier = await Supplier.get(supplier_id)
     if not supplier:
         raise HTTPException(404, "Supplier not found")

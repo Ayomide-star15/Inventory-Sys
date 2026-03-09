@@ -6,6 +6,8 @@ from app.dependencies.auth import get_current_user
 from app.models.user import User, UserRole  # ✅ Import UserRole
 from app.models.inventory import Inventory, AdjustmentLog
 from app.schemas.inventory import StockAdjustmentSchema
+from app.models.branch import Branch
+from app.models.product import Product
 
 router = APIRouter(tags=["Inventory Management"])
 
@@ -85,9 +87,10 @@ async def get_adjustment_history(
 ):
     """
     Get adjustment history for a specific branch.
+    Store Managers can only view their own branch. Admins and Finance Managers can view all branches.
     """
 
-    # ✅ FIXED: Use UserRole enum constants throughout
+    #FIXED: Use UserRole enum constants throughout
     if current_user.role == UserRole.STORE_MANAGER:
         if str(current_user.branch_id) != str(branch_id):
             raise HTTPException(
@@ -138,6 +141,7 @@ async def get_branch_inventory(
 ):
     """
     Get all inventory items for a specific branch.
+    Store Managers, Store Staff, and Sales Staff can only view their own branch. Admins and Finance Managers can view all branches.
     """
 
     if current_user.role in [UserRole.STORE_MANAGER, UserRole.STORE_STAFF, UserRole.SALES_STAFF]:
@@ -152,3 +156,103 @@ async def get_branch_inventory(
     ).to_list()
 
     return inventory_items
+
+
+
+# ==========================================
+# GET ADJUSTMENT HISTORY - Single Branch
+# (Fixed: now has proper role checks)
+# ==========================================
+@router.get("/history/{branch_id}", response_model=list)
+async def get_adjustment_history(
+    branch_id: UUID,
+    page: int = 1,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user)
+):
+    # Admin and Finance can view any branch
+    if current_user.role in [UserRole.ADMIN, UserRole.FINANCE]:
+        pass
+    # Store Manager can only view their own branch
+    elif current_user.role == UserRole.STORE_MANAGER:
+        if str(current_user.branch_id) != str(branch_id):
+            raise HTTPException(status_code=403, detail="You can only view your own branch adjustment logs")
+    else:
+        raise HTTPException(status_code=403, detail="Access Denied")
+
+    skip = (page - 1) * limit
+    logs = await AdjustmentLog.find(
+        AdjustmentLog.branch_id == branch_id
+    ).sort(-AdjustmentLog.date).skip(skip).limit(limit).to_list()
+
+    result = []
+    for log in logs:
+        product = await Product.get(log.product_id)
+        user = await User.find_one(User.user_id == log.user_id)
+        result.append({
+            "id": str(log.id),
+            "product_id": str(log.product_id),
+            "product_name": product.name if product else "Unknown",
+            "quantity_removed": log.quantity_removed,
+            "reason": log.reason,
+            "note": log.note,
+            "adjusted_by": f"{user.first_name} {user.last_name}" if user else "Unknown",
+            "date": log.date
+        })
+
+    return result
+
+
+# ==========================================
+# GET ALL ADJUSTMENT LOGS - All Branches
+# (New: Admin and Finance only)
+# ==========================================
+@router.get("/adjustments/all", response_model=dict)
+async def get_all_adjustment_logs(
+    branch_id: UUID = None,   # optional filter by branch
+    reason: str = None,       # optional filter by reason e.g. "theft"
+    page: int = 1,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user)
+):
+    """Admin and Finance only.** Retrieves all stock adjustment logs across branches with optional filtering by branch and reason. Provides pagination support. This endpoint is intended for high-level oversight and auditing of stock adjustments across the entire organization."""
+    if current_user.role not in [UserRole.ADMIN, UserRole.FINANCE]:
+        raise HTTPException(status_code=403, detail="Access Denied: Admin and Finance only")
+
+    query_filter = {}
+    if branch_id:
+        query_filter["branch_id"] = branch_id
+    if reason:
+        query_filter["reason"] = reason
+
+    skip = (page - 1) * limit
+    total = await AdjustmentLog.find(query_filter).count()
+    logs = await AdjustmentLog.find(query_filter).sort(-AdjustmentLog.date).skip(skip).limit(limit).to_list()
+
+    branches = await Branch.find_all().to_list()
+    branch_map = {str(b.id): b.name for b in branches}
+
+    result = []
+    for log in logs:
+        product = await Product.get(log.product_id)
+        user = await User.find_one(User.user_id == log.user_id)
+        result.append({
+            "id": str(log.id),
+            "branch": branch_map.get(str(log.branch_id), "Unknown"),
+            "product_id": str(log.product_id),
+            "product_name": product.name if product else "Unknown",
+            "quantity_removed": log.quantity_removed,
+            "reason": log.reason,
+            "note": log.note,
+            "adjusted_by": f"{user.first_name} {user.last_name}" if user else "Unknown",
+            "adjusted_by_role": user.role.value if user else "Unknown",
+            "date": log.date
+        })
+
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit,
+        "data": result
+    }

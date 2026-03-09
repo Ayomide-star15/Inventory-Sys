@@ -30,6 +30,7 @@ async def create_transfer_request(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    "Store Manager only.** Creates a new stock transfer request from one branch to another. Validates stock availability and logs the action."
     if current_user.role != UserRole.STORE_MANAGER:
         raise HTTPException(status_code=403, detail="Only Store Managers can create transfer requests")
 
@@ -122,6 +123,7 @@ async def approve_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    "Store Manager only.** Approves a pending transfer request. Validates that approved quantities do not exceed requested quantities. Logs the approval action."
     if current_user.role != UserRole.STORE_MANAGER:
         raise HTTPException(status_code=403, detail="Only Store Managers can approve transfers")
 
@@ -187,6 +189,7 @@ async def ship_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    "Store Staff and Store Manager.** Marks an approved transfer as 'In Transit'. Validates that the user belongs to the source branch and that stock is still available. Logs the shipping action."
     if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
         raise HTTPException(status_code=403, detail="Only Store Staff can ship transfers")
 
@@ -257,6 +260,12 @@ async def receive_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Store Staff and Store Manager only.
+    Marks an 'In Transit' transfer as 'Completed'.
+    Validates that the user belongs to the destination branch and updates inventory accordingly.
+    Logs the receiving action.
+    """
     if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
         raise HTTPException(status_code=403, detail="Only Store Staff can receive transfers")
 
@@ -342,6 +351,10 @@ async def reject_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Store Manager only.
+    Rejects a pending transfer request.
+    """
     if current_user.role != UserRole.STORE_MANAGER:
         raise HTTPException(status_code=403, detail="Only Store Managers can reject transfers")
 
@@ -386,6 +399,8 @@ async def get_transfer_details(
     transfer_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
+    """Store Staff, Store Manager, and Admin.** Retrieves detailed information about a specific transfer request. Access is restricted to users whose branch is involved in the transfer or admins. Provides comprehensive details including branch names, product details, quantities at each stage, timestamps, and user information.
+    """
     transfer = await StockTransfer.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
@@ -431,6 +446,7 @@ async def list_transfers(
     limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
+    """Store Staff, Store Manager, and Admin.** Lists transfer requests with optional filtering by status and branch. Supports pagination. Regular users see only transfers involving their branch, while admins can see all transfers or filter by any branch."""
     query = {}
 
     if current_user.role != UserRole.ADMIN:

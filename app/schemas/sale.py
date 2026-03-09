@@ -17,25 +17,69 @@ class SaleItemCreate(BaseModel):
 
 class SaleCreate(BaseModel):
     """Create a new sale transaction"""
-    items: List[SaleItemCreate] = Field(..., min_length=1, description="Must have at least 1 item")
+    items: List[SaleItemCreate] = Field(..., min_length=1)
     payment_method: PaymentMethod
-    discount: float = Field(default=0.0, ge=0, description="Discount amount (cannot be negative)")
-    amount_paid: float = Field(..., gt=0, description="Amount customer paid")
     till_number: Optional[str] = None
     notes: Optional[str] = None
 
 
 class SaleCancelRequest(BaseModel):
     """Cancel/void a sale"""
-    cancellation_reason: str = Field(..., min_length=5, description="Must provide reason for cancellation")
+    cancellation_reason: str = Field(..., min_length=5)
 
 
 # ==========================================
-# RESPONSE SCHEMAS (What API returns)
+# QUOTE SCHEMAS (new)
+# ==========================================
+
+class QuoteItemInput(BaseModel):
+    """Single item in a quote request"""
+    product_id: UUID
+    quantity: int = Field(..., gt=0)
+
+
+class QuoteRequest(BaseModel):
+    """
+    What the frontend sends to get a price preview.
+    No sale is created. Safe to call as many times as needed.
+    """
+    items: List[QuoteItemInput] = Field(..., min_length=1)
+    discount: float = Field(default=0.0, ge=0)
+
+
+class QuoteItemResponse(BaseModel):
+    """One item in the quote response"""
+    product_id: str
+    product_name: str
+    sku: str
+    quantity: int
+    unit_price: float
+    line_total: float
+    available_quantity: int  # so frontend can show stock warning
+
+
+class QuoteResponse(BaseModel):
+    """
+    Full price breakdown returned to the cashier screen.
+    Frontend displays this — staff never calculates anything.
+    """
+    items: List[QuoteItemResponse]
+    subtotal: float
+    discount: float
+    discounted_subtotal: float
+    tax: float
+    tax_rate: str               # e.g. "7.5%" — display on receipt
+    total_amount: float
+    currency_symbol: str
+    items_count: int
+    payment_methods: List[str]  # dropdown options for frontend
+
+
+# ==========================================
+# RESPONSE SCHEMAS
 # ==========================================
 
 class SaleItemResponse(BaseModel):
-    """Sale item details in response"""
     product_id: UUID
     product_name: str
     sku: str
@@ -46,7 +90,6 @@ class SaleItemResponse(BaseModel):
 
 
 class SaleResponse(BaseModel):
-    """Complete sale details"""
     sale_id: UUID
     sale_number: str
     branch_id: UUID
@@ -63,13 +106,12 @@ class SaleResponse(BaseModel):
     till_number: Optional[str]
     notes: Optional[str]
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 class SaleSummaryResponse(BaseModel):
-    """Quick summary for lists"""
     sale_id: UUID
     sale_number: str
     total_amount: float
@@ -80,15 +122,14 @@ class SaleSummaryResponse(BaseModel):
 
 
 class ProductInventoryResponse(BaseModel):
-    """Product with inventory for sales staff"""
     product_id: UUID
     name: str
     sku: str
     barcode: str
     price: float
     category_name: str
-    available_quantity: int  # At their branch
+    available_quantity: int
     image_url: Optional[str]
-    
+
     class Config:
         from_attributes = True

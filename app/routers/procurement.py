@@ -1,3 +1,5 @@
+from multiprocessing.dummy import Manager
+
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 from datetime import datetime
 from uuid import UUID
@@ -33,6 +35,7 @@ async def create_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    "Purchase Manager only.** Creates a PO for a supplier targeting a specific branch. POs under the approval threshold are sent automatically. POs above the threshold require Finance Manager approval. Validates supplier and branch existence and logs the creation action."
     if current_user.role != UserRole.PURCHASE:
         raise HTTPException(status_code=403, detail="Access Denied: Only Purchase Managers can create Purchase Orders")
 
@@ -122,6 +125,9 @@ async def approve_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Finance Manager only.** Approves a pending PO. Validates that the PO is in the correct status for approval. Updates the PO status and logs the approval action with details about the order and supplier.
+    """
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Access Denied: Only Finance Managers can approve orders")
 
@@ -166,6 +172,9 @@ async def reject_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Finance Manager only.** Rejects a pending PO. Validates that the PO is in the correct status for rejection. Updates the PO status and logs the rejection action with details about the order and supplier.
+    """
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Access Denied: Only Finance Managers can reject orders")
 
@@ -205,6 +214,9 @@ async def receive_goods(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Store Staff and Store Manager only.
+    """
     if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
         raise HTTPException(status_code=403, detail="Access Denied: Only Store Staff can receive goods")
 
@@ -310,12 +322,29 @@ async def get_purchase_orders(
     limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
-    query = PurchaseOrder.find_all()
-    if po_status:
-        query = PurchaseOrder.find(PurchaseOrder.status == po_status)
+    """Store Staff, Store Manager, and Admin.** Lists purchase orders with optional filtering by status. Supports pagination. Regular users see only orders for their branch, while admins can see all orders or filter by any branch."""
+    # Sales Staff have no business seeing POs
+    if current_user.role == UserRole.SALES_STAFF:
+        raise HTTPException(status_code=403, detail="Access Denied")
 
     skip = (page - 1) * limit
-    orders = await query.skip(skip).limit(limit).to_list()
+
+    # Admin, Finance, Purchase Manager see ALL POs
+    if current_user.role in [UserRole.ADMIN, UserRole.FINANCE, UserRole.PURCHASE]:
+        query_filter = {}
+        if po_status:
+            query_filter["status"] = po_status
+        orders = await PurchaseOrder.find(query_filter).skip(skip).limit(limit).to_list()
+
+    # Store Manager and Store Staff see only their branch's POs
+    else:
+        if not current_user.branch_id:
+            raise HTTPException(status_code=400, detail="No branch assigned to your account")
+        
+        query_filter = {"target_branch": current_user.branch_id}
+        if po_status:
+            query_filter["status"] = po_status
+        orders = await PurchaseOrder.find(query_filter).skip(skip).limit(limit).to_list()
 
     return [
         {
@@ -340,6 +369,7 @@ async def get_purchase_order(
     po_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
+    """Store Staff, Store Manager, and Admin.** Retrieves detailed information about a specific purchase order. Access is restricted to users whose branch is the target of the order or admins. Provides comprehensive details including supplier and branch names, product details, quantities, costs, timestamps, and user information."""
     po = await PurchaseOrder.get(po_id)
     if not po:
         raise HTTPException(status_code=404, detail="Purchase Order not found")
@@ -397,6 +427,8 @@ async def get_purchase_order(
 # ==========================================
 @router.get("/pending/approvals", response_model=List[dict])
 async def get_pending_approvals(current_user: User = Depends(get_current_user)):
+    """Finance Manager only.** Retrieves a list of purchase orders that are pending approval. Provides summary information for each order, including supplier and branch names, total amount, creation date, and item count. This endpoint helps Finance Managers quickly identify which orders require their attention for approval.
+    """
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Access Denied")
 

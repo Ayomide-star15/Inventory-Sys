@@ -96,7 +96,10 @@ async def get_sales_by_branch(
     end_date: Optional[datetime] = None,
     current_user: User = Depends(get_current_active_user)
 ):
-    """Revenue breakdown per branch."""
+    """
+    Finance and Admin only.
+    Revenue breakdown per branch.
+    """
     require_finance_or_admin(current_user)
 
     if not end_date:
@@ -159,6 +162,7 @@ async def get_sales_by_payment_method(
     current_user: User = Depends(get_current_active_user)
 ):
     """
+    Finance and Admin only.
     Revenue split by payment method.
     Useful for detecting fraud (branch doing 90% cash is suspicious).
     """
@@ -311,7 +315,10 @@ async def get_tax_report(
     end_date: Optional[datetime] = None,
     current_user: User = Depends(get_current_active_user)
 ):
-    """Total VAT collected across all branches."""
+    """
+    Finance and Admin only.
+    Total VAT collected across all branches.
+    """
     require_finance_or_admin(current_user)
 
     if not end_date:
@@ -365,7 +372,10 @@ async def get_procurement_spend(
     end_date: Optional[datetime] = None,
     current_user: User = Depends(get_current_active_user)
 ):
-    """How much was spent on Purchase Orders per branch and supplier."""
+    """
+    How much was spent on Purchase Orders per branch and supplier.
+    Finance and Admin only.
+    """
     require_finance_or_admin(current_user)
 
     if not end_date:
@@ -424,6 +434,7 @@ async def get_slow_moving_inventory(
     current_user: User = Depends(get_current_active_user)
 ):
     """
+    Finance and Admin only.
     Products sitting in stock that haven't moved.
     Money tied up in slow stock.
     """

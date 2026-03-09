@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
+    # Frontend 
+    FRONTEND_URL: str = "http://localhost:3000"
+
     # CORS
     CORS_ORIGINS: List[str] = ["*"]
 
