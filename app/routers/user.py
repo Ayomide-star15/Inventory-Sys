@@ -115,6 +115,8 @@ async def setup_password(request: Request, data: PasswordSetup):
 # ---------------------------------------------------------
 @router.get("/", response_model=List[dict])
 async def list_users(admin: User = Depends(get_admin_user)):
+    """Admin only.** Retrieves a list of all users in the system with their details. This endpoint is intended for administrative oversight and user management purposes.
+    """ 
     users = await User.find_all().to_list()
     return [
         {
