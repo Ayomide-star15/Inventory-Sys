@@ -669,3 +669,13 @@ async def get_inactive_users(
         }
         for u in inactive
     ]
+
+@router.get("/roles", response_model=list)
+async def get_roles(
+    admin: User = Depends(get_admin_user)
+):
+    """
+    Returns all available user roles in the system.
+    Admin only.
+    """
+    return [role.value for role in UserRole]
