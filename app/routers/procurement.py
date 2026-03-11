@@ -425,14 +425,21 @@ async def get_purchase_order(
 # ==========================================
 # 7. GET PENDING APPROVALS (Finance Only)
 # ==========================================
-@router.get("/pending/approvals", response_model=List[dict])
-async def get_pending_approvals(current_user: User = Depends(get_current_user)):
-    """Finance Manager only.** Retrieves a list of purchase orders that are pending approval. Provides summary information for each order, including supplier and branch names, total amount, creation date, and item count. This endpoint helps Finance Managers quickly identify which orders require their attention for approval.
-    """
+@router.get("/pending/approvals", response_model=dict)
+async def get_pending_approvals(
+    page: int = 1,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user)
+):
+    """Finance Manager only. Paginated list of POs pending approval."""
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Access Denied")
 
-    pending_orders = await PurchaseOrder.find(PurchaseOrder.status == POStatus.PENDING_APPROVAL).to_list()
+    total = await PurchaseOrder.find(PurchaseOrder.status == POStatus.PENDING_APPROVAL).count()
+    skip = (page - 1) * limit
+    pending_orders = await PurchaseOrder.find(
+        PurchaseOrder.status == POStatus.PENDING_APPROVAL
+    ).skip(skip).limit(limit).to_list()
 
     result = []
     for order in pending_orders:
@@ -447,4 +454,10 @@ async def get_pending_approvals(current_user: User = Depends(get_current_user)):
             "items_count": len(order.items)
         })
 
-    return result
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit,
+        "data": result
+    }

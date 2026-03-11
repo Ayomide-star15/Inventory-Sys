@@ -52,14 +52,15 @@ async def get_settings() -> SystemSettings:
 # 1. VIEW PRODUCTS WITH INVENTORY
 # ==========================================
 
-@router.get("/products", response_model=List[ProductInventoryResponse])
+@router.get("/products", response_model=dict)
 async def get_products_for_sale(
     search: Optional[str] = None,
     category_id: Optional[UUID] = None,
+    page: int = 1,
+    limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
-    
-    "Sales Staff and Store Manager only.** Returns all in-stock products at the  branch. Supports search by name, SKU, or category."
+    """Sales Staff. Paginated in-stock products at the cashier's branch."""
     if current_user.role not in SALE_ROLES:
         raise HTTPException(status_code=403, detail="Access Denied")
 
@@ -79,7 +80,8 @@ async def get_products_for_sale(
     else:
         product_query = Product.find_all()
 
-    products = await product_query.to_list()
+    skip = (page - 1) * limit
+    products = await product_query.skip(skip).limit(limit).to_list()
 
     result = []
     for product in products:
@@ -100,8 +102,11 @@ async def get_products_for_sale(
                 "image_url": product.image_url
             })
 
-    return result
-
+    return {
+        "page": page,
+        "limit": limit,
+        "data": result
+    }
 
 # ==========================================
 # 2. SEARCH BY BARCODE

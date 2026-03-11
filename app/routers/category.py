@@ -107,7 +107,7 @@ async def delete_category(
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")
     
-    # 2. 🛡️ SAFETY CHECK: Are any products using this?
+    # 2. SAFETY CHECK: Are any products using this?
     # We ask the Product collection: "Do you have anyone with this category_id?"
     products_using_category = await Product.find(
         Product.category_id == category_id
@@ -123,7 +123,7 @@ async def delete_category(
 
 
 # ==========================================
-# 🌍 PUBLIC ENDPOINTS (Read Only)
+# PUBLIC ENDPOINTS (Read Only)
 # ==========================================
 
 @router.get(
@@ -137,13 +137,22 @@ async def get_categories(user: User = Depends(get_current_user)):
 
 
 @router.get(
-    "/{category_id}", 
-    response_model=CategoryResponse,
-    summary="Get Single Category",
-    description="Fetch details of a specific category by its UUID."
+    "/",
+    summary="List All Categories",
+    description="Returns a paginated list of all categories. Accessible to any logged-in user."
 )
-async def get_category(category_id: UUID, user: User = Depends(get_current_user)):
-    category = await Category.get(category_id)
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-    return category
+async def get_categories(
+    page: int = 1,
+    limit: int = 50,
+    user: User = Depends(get_current_user)
+):
+    total = await Category.find_all().count()
+    skip = (page - 1) * limit
+    categories = await Category.find_all().skip(skip).limit(limit).to_list()
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit,
+        "data": categories
+    }

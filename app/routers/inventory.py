@@ -110,54 +110,59 @@ async def get_adjustment_history(
     return logs
 
 
-@router.get("/{branch_id}/low-stock", response_model=list)
+@router.get("/{branch_id}/low-stock", response_model=dict)
 async def get_low_stock_items(
     branch_id: str,
+    page: int = 1,
+    limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get items that are below reorder point for a specific branch.
-    """
-
+    """Get paginated low-stock items for a specific branch."""
     if current_user.role in [UserRole.STORE_MANAGER, UserRole.STORE_STAFF]:
         if str(current_user.branch_id) != str(branch_id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
+            raise HTTPException(status_code=403, detail="Access denied")
 
-    low_stock_items = await Inventory.find({
-        "branch_id": branch_id,
-        "quantity": {"$lte": 10}
-    }).to_list()
+    query = {"branch_id": branch_id, "quantity": {"$lte": 10}}
+    total = await Inventory.find(query).count()
+    skip = (page - 1) * limit
+    low_stock_items = await Inventory.find(query).skip(skip).limit(limit).to_list()
 
-    return low_stock_items
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit,
+        "data": low_stock_items
+    }
 
-
-@router.get("/{branch_id}", response_model=list)
+@router.get("/{branch_id}", response_model=dict)
 async def get_branch_inventory(
     branch_id: str,
+    page: int = 1,
+    limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get all inventory items for a specific branch.
-    Store Managers, Store Staff, and Sales Staff can only view their own branch. Admins and Finance Managers can view all branches.
+    Get paginated inventory items for a specific branch.
+    Store Managers, Store Staff, and Sales Staff can only view their own branch.
     """
-
     if current_user.role in [UserRole.STORE_MANAGER, UserRole.STORE_STAFF, UserRole.SALES_STAFF]:
         if str(current_user.branch_id) != str(branch_id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You can only view inventory for your assigned branch"
-            )
+            raise HTTPException(status_code=403, detail="You can only view inventory for your assigned branch")
 
+    total = await Inventory.find(Inventory.branch_id == branch_id).count()
+    skip = (page - 1) * limit
     inventory_items = await Inventory.find(
         Inventory.branch_id == branch_id
-    ).to_list()
+    ).skip(skip).limit(limit).to_list()
 
-    return inventory_items
-
-
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit,
+        "data": inventory_items
+    }
 
 # ==========================================
 # GET ADJUSTMENT HISTORY - Single Branch

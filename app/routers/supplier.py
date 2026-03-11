@@ -41,12 +41,23 @@ async def create_supplier(
 
     return new_supplier
 
-
-@router.get("/", response_model=List[SupplierResponse])
-async def get_suppliers(manager: User = Depends(get_product_manager)):
-    return await Supplier.find_all().to_list()
-
-"Admin and Purchase Manager only.** Returns all suppliers. Use `?active=true` to filter active suppliers only."
+@router.get("/", response_model=dict)
+async def get_suppliers(
+    page: int = 1,
+    limit: int = 50,
+    manager: User = Depends(get_product_manager)
+):
+    """Admin and Purchase Manager only. Returns paginated list of suppliers."""
+    total = await Supplier.find_all().count()
+    skip = (page - 1) * limit
+    suppliers = await Supplier.find_all().skip(skip).limit(limit).to_list()
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit,
+        "data": suppliers
+    }
 
 
 @router.get("/{supplier_id}", response_model=SupplierResponse)
