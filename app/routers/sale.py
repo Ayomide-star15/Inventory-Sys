@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime, timedelta
-
+from app.core.rate_limit import limiter  # <--- NEW
 from app.models.sale import Sale, SaleItem, SaleStatus, PaymentMethod
 from app.models.product import Product
 from app.models.inventory import Inventory
@@ -53,7 +53,9 @@ async def get_settings() -> SystemSettings:
 # ==========================================
 
 @router.get("/products", response_model=dict)
+@limiter.limit("60/minute")  # <--- NEW: Limit to 60 product search requests per minute per IP
 async def get_products_for_sale(
+    request: Request,
     search: Optional[str] = None,
     category_id: Optional[UUID] = None,
     page: int = 1,

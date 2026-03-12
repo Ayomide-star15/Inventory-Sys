@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from uuid import UUID
 from datetime import datetime
-
+from app.core.rate_limit import limiter  # <--- NEW
 from app.dependencies.auth import get_current_user
 from app.models.user import User, UserRole  # ✅ Import UserRole
 from app.models.inventory import Inventory, AdjustmentLog
@@ -13,7 +13,9 @@ router = APIRouter(tags=["Inventory Management"])
 
 
 @router.post("/adjust", status_code=200)
+@limiter.limit("10/minute")  # <--- NEW: Limit to 10 stock adjustments per minute per IP
 async def adjust_stock(
+    request: Request,
     data: StockAdjustmentSchema,
     current_user: User = Depends(get_current_user)
 ):

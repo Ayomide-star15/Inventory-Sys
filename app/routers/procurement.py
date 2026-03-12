@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request
 from datetime import datetime
 from uuid import UUID
 from typing import List
-
+from app.core.rate_limit import limiter  # <--- NEW
 from app.models.purchase_order import PurchaseOrder, POStatus, POItem
 from app.models.inventory import Inventory
 from app.models.product import Product
@@ -30,6 +30,7 @@ async def get_settings() -> SystemSettings:
 # 1. CREATE PURCHASE ORDER
 # ==========================================
 @router.post("/create", response_model=dict, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")  # <--- NEW: Limit to 10 PO creation attempts per minute per IP
 async def create_po(
     data: POCreateSchema,
     request: Request,

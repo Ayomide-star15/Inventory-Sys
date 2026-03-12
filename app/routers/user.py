@@ -10,6 +10,7 @@ from app.core.security import get_password_hash, create_invite_token, create_acc
 from app.dependencies.auth import get_admin_user, get_current_active_user
 from app.core.config import settings
 from app.core.email import send_invite_email, send_reset_password_email
+from app.core.rate_limit import limiter  # <--- NEW
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip
@@ -24,6 +25,7 @@ router = APIRouter()
 # 1. INVITE NEW USER (Admin Only)
 # ---------------------------------------------------------
 @router.post("/admin/create-user", response_model=dict, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")  # <--- NEW: Limit to 10 user creation attempts per minute per IP
 async def create_user(
     request: Request,
     invite_data: UserInvite,
@@ -77,6 +79,7 @@ async def create_user(
 # 2. SETUP PASSWORD
 # ---------------------------------------------------------
 @router.post("/setup-password", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")  # <--- NEW: Limit to 5 password setup attempts per minute per IP
 async def setup_password(request: Request, data: PasswordSetup):
     try:
         payload = jwt.decode(data.token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -158,6 +161,7 @@ async def get_my_profile(current_user: User = Depends(get_current_active_user)):
 # 5. FORGOT PASSWORD
 # ---------------------------------------------------------
 @router.post("/forgot-password")
+@limiter.limit("5/minute")  # <--- NEW: Limit to 5 forgot password attempts per minute per IP
 async def forgot_password(request: Request, req: ForgotPasswordRequest):
     user = await User.find_one(User.email == req.email)
     if not user:
@@ -182,6 +186,7 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest):
 # 6. RESET PASSWORD
 # ---------------------------------------------------------
 @router.post("/reset-password")
+@limiter.limit("5/minute")  # <--- NEW: Limit to 5 reset password attempts per minute per IP
 async def reset_password(request: Request, req: ResetPasswordRequest):
     try:
         payload = jwt.decode(req.token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])

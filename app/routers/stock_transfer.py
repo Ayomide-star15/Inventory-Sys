@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
-
+from app.core.rate_limit import limiter  # <--- NEW
 from app.dependencies.auth import get_current_user
 from app.models.user import User, UserRole
 from app.models.stock_transfer import StockTransfer, TransferStatus
@@ -25,6 +25,7 @@ router = APIRouter(prefix="/stock-transfers", tags=["Stock Transfers"])
 # ==========================================
 
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")  # <--- NEW: Limit to 10 transfer creation attempts per minute per IP
 async def create_transfer_request(
     transfer_data: StockTransferCreate,
     request: Request,

@@ -6,11 +6,13 @@ from app.core.security import verify_password, create_access_token
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip, mask_email
+from app.core.rate_limit import limiter  # <--- NEW
 
 router = APIRouter()
 
 
 @router.post("/login")
+@limiter.limit("5/minute")  # <--- NEW: Limit to 5 login attempts per minute per IP
 async def login(
     request: Request,
     form_data: OAuth2PasswordRequestForm = Depends()
@@ -68,14 +70,14 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 6. ✅ Update last_login timestamp
+    # 6.Update last_login timestamp
     user.last_login = datetime.utcnow()
     await user.save()
 
     # 7. Generate token
     access_token = create_access_token(data={"sub": user.email, "type": "access"})
 
-    # 8. ✅ Log successful login
+    # 8. Log successful login
     await log_action(
         user=user,
         action=AuditAction.LOGIN,
