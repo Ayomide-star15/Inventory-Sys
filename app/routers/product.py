@@ -262,6 +262,13 @@ async def update_product_price(
     product.last_price_changed_by = manager.user_id
     await product.save()
 
+    inventory_records = await Inventory.find({"product_id": str(product_id)}).to_list()
+    branches_updated = 0
+    for inventory in inventory_records:
+        inventory.selling_price = new_price
+        await inventory.save()
+        branches_updated += 1
+
     old_margin = ((old_price - old_cost_price) / old_cost_price) * 100
     new_margin = ((new_price - new_cost_price) / new_cost_price) * 100
 
@@ -286,7 +293,7 @@ async def update_product_price(
         changed_by_name=f"{manager.first_name} {manager.last_name}",
         changed_by_role=manager.role.value,
         effective_date=datetime.utcnow(),
-        applied_branches=0
+        applied_branches=branches_updated
     )
     await price_record.insert()
 
@@ -316,6 +323,7 @@ async def update_product_price(
         "new_price": new_price,
         "old_margin_percentage": round(old_margin, 2),
         "new_margin_percentage": round(new_margin, 2),
+        "branches_updated": branches_updated,
         "applied_to_all_branches": True
     }
 
