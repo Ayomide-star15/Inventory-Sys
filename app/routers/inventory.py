@@ -1,19 +1,27 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from uuid import UUID
 from datetime import datetime
-from app.core.rate_limit import limiter  # <--- NEW
+from app.core.rate_limit import limiter
 from app.dependencies.auth import get_current_user
-from app.models.user import User, UserRole  # ✅ Import UserRole
+from app.models.user import User, UserRole
 from app.models.inventory import Inventory, AdjustmentLog
+from app.models.system_settings import SystemSettings
 from app.schemas.inventory import StockAdjustmentSchema
 from app.models.branch import Branch
 from app.models.product import Product
+from app.core.email import send_low_stock_alert_email  # ✅ NEW
 
 router = APIRouter(tags=["Inventory Management"])
+logger = logging.getLogger(__name__)  # ✅ NEW
 
+
+async def get_settings() -> SystemSettings:
+    s = await SystemSettings.find_one({})
+    return s if s else SystemSettings()
 
 @router.post("/adjust", status_code=200)
-@limiter.limit("10/minute")  # <--- NEW: Limit to 10 stock adjustments per minute per IP
+@limiter.limit("10/minute")
 async def adjust_stock(
     request: Request,
     data: StockAdjustmentSchema,
@@ -22,9 +30,9 @@ async def adjust_stock(
     """
     Adjust stock levels (remove stock for damage, theft, etc.)
     Only Store Managers can perform this action.
+    Triggers low stock email to Store Manager + Purchase Managers
+    if stock drops to or below critical threshold.
     """
-
-    # ✅ FIXED: Use UserRole enum, not raw string "Store Manager"
     if current_user.role != UserRole.STORE_MANAGER:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -37,9 +45,6 @@ async def adjust_stock(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User has no branch assigned"
         )
-
-    user_branch_str = str(user_branch_id)
-    product_id_str = str(data.product_id)
 
     inventory = await Inventory.find_one({
         "product_id": str(data.product_id),
@@ -58,13 +63,15 @@ async def adjust_stock(
             detail=f"Insufficient stock. Available: {inventory.quantity}, Requested: {data.quantity}"
         )
 
+    # Deduct stock
     inventory.quantity -= data.quantity
     inventory.updated_at = datetime.utcnow()
     await inventory.save()
 
+    # Save adjustment log
     log = AdjustmentLog(
-        branch_id=UUID(user_branch_str),
-        product_id=UUID(product_id_str),
+        branch_id=UUID(str(user_branch_id)),
+        product_id=UUID(str(data.product_id)),
         user_id=current_user.user_id,
         quantity_removed=data.quantity,
         reason=data.reason,
@@ -73,14 +80,77 @@ async def adjust_stock(
     )
     await log.save()
 
+    # ✅ Check critical stock and notify Store Manager + Purchase Managers
+    sys_settings = await get_settings()
+    is_critical = inventory.quantity <= sys_settings.critical_stock_threshold
+
+    if is_critical:
+        try:
+            branch = await Branch.get(user_branch_id)
+            branch_name = branch.name if branch else "Unknown"
+
+            # Notify Store Manager of this branch
+            store_managers = await User.find(
+                User.role == UserRole.STORE_MANAGER,
+                User.branch_id == user_branch_id,
+                User.is_active == True
+            ).to_list()
+
+            for manager in store_managers:
+                await send_low_stock_alert_email(
+                    email_to=manager.email,
+                    first_name=manager.first_name,
+                    product_name=inventory.product_name,
+                    branch_name=branch_name,
+                    quantity=inventory.quantity,
+                    role="Store Manager"
+                )
+                logger.info(
+                    f"Low stock alert sent to Store Manager "
+                    f"{manager.email} for {inventory.product_name} "
+                    f"at {branch_name} ({inventory.quantity} units left)"
+                )
+
+            # Notify ALL Purchase Managers system-wide
+            purchase_managers = await User.find(
+                User.role == UserRole.PURCHASE,
+                User.is_active == True
+            ).to_list()
+
+            for pm in purchase_managers:
+                await send_low_stock_alert_email(
+                    email_to=pm.email,
+                    first_name=pm.first_name,
+                    product_name=inventory.product_name,
+                    branch_name=branch_name,
+                    quantity=inventory.quantity,
+                    role="Purchase Manager"
+                )
+                logger.info(
+                    f"Low stock alert sent to Purchase Manager "
+                    f"{pm.email} for {inventory.product_name} "
+                    f"at {branch_name} ({inventory.quantity} units left)"
+                )
+
+        except Exception as e:
+            logger.error(
+                f"Low stock alert email failed after adjustment "
+                f"for {inventory.product_name}: {e}"
+            )
+
     return {
         "message": "Stock adjusted successfully",
-        "product_id": product_id_str,
+        "product_id": str(data.product_id),
+        "product_name": inventory.product_name,
         "quantity_removed": data.quantity,
         "new_quantity": inventory.quantity,
-        "reason": data.reason
+        "reason": data.reason,
+        "low_stock_alert": is_critical,
+        "alert_message": (
+            f"CRITICAL: Only {inventory.quantity} unit(s) remaining. "
+            f"Store Manager and Purchase Managers have been notified."
+        ) if is_critical else None
     }
-
 
 @router.get("/history/{branch_id}", response_model=list)
 async def get_adjustment_history(

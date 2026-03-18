@@ -214,22 +214,106 @@ async def send_transfer_approved_email(
 
 # ==========================================
 # 8. LOW STOCK ALERT
+# (Replaces old send_low_stock_email)
+# Notifies Store Manager AND Purchase Manager
+# with role-specific action instructions
 # ==========================================
-async def send_low_stock_email(
-    email_to: str, first_name: str,
-    product_name: str, branch_name: str, quantity: int
+async def send_low_stock_alert_email(
+    email_to: str,
+    first_name: str,
+    product_name: str,
+    branch_name: str,
+    quantity: int,
+    role: str
 ):
+    if role == "Store Manager":
+        action_text = f"""
+        Please request a <strong>stock transfer</strong> from another
+        branch to <strong>{branch_name}</strong> immediately.
+        """
+        color = "#e67e22"
+        action_title = "Request Stock Transfer"
+    else:
+        action_text = f"""
+        Please raise a <strong>Purchase Order</strong> for
+        <strong>{product_name}</strong> and target it to
+        <strong>{branch_name}</strong> immediately before
+        stock runs out completely.
+        """
+        color = "#e74c3c"
+        action_title = "Raise a Purchase Order"
+
     html = f"""
     <html><body style="font-family:Arial,sans-serif;color:#333;">
       <div style="background:#f4f4f4;padding:20px;">
-        <div style="background:white;padding:20px;border-radius:8px;max-width:500px;margin:auto;">
-          <h2 style="color:#e74c3c;">Critical Stock Alert</h2>
+        <div style="background:white;padding:20px;border-radius:8px;
+                    max-width:500px;margin:auto;border-top:4px solid {color};">
+
+          <h2 style="color:{color};margin-top:0;">
+            Critical Stock Alert
+          </h2>
+
           <p>Hello {first_name},</p>
-          <p><strong>{product_name}</strong> at <strong>{branch_name}</strong>
-             is critically low — only <strong>{quantity} unit(s)</strong> remaining.</p>
-          <p>Please raise a purchase order or arrange a stock transfer immediately.</p>
+          <p>A product at one of your branches has reached a
+             <strong>critical stock level</strong> and requires
+             your immediate attention.</p>
+
+          <!-- Product & Branch Info Box -->
+          <div style="background:#fff8f8;border:1px solid {color};
+                      padding:16px;border-radius:8px;margin:16px 0;">
+            <table style="width:100%;font-size:14px;">
+              <tr>
+                <td style="color:#888;padding:4px 0;width:40%;">
+                  Product:
+                </td>
+                <td style="font-weight:bold;color:#333;padding:4px 0;">
+                  {product_name}
+                </td>
+              </tr>
+              <tr>
+                <td style="color:#888;padding:4px 0;">Branch:</td>
+                <td style="font-weight:bold;color:#333;padding:4px 0;">
+                  {branch_name}
+                </td>
+              </tr>
+              <tr>
+                <td style="color:#888;padding:4px 0;">
+                  Stock Remaining:
+                </td>
+                <td style="padding:4px 0;">
+                  <span style="color:{color};font-size:20px;
+                               font-weight:bold;">
+                    {quantity} unit(s)
+                  </span>
+                </td>
+              </tr>
+            </table>
+          </div>
+
+          <!-- Action Required -->
+          <div style="background:#f8f8f8;padding:12px 16px;
+                      border-radius:6px;margin:16px 0;">
+            <p style="margin:0;font-size:13px;">
+              <strong style="color:{color};">
+                Action Required — {action_title}
+              </strong><br><br>
+              {action_text}
+            </p>
+          </div>
+
+          <p style="font-size:11px;color:#999;margin-top:24px;
+                    border-top:1px solid #eee;padding-top:12px;">
+            This is an automated alert from {settings.MAIL_FROM_NAME}.<br>
+            Triggered when stock at <strong>{branch_name}</strong>
+            dropped to {quantity} unit(s) of
+            <strong>{product_name}</strong>.
+          </p>
         </div>
       </div>
     </body></html>
     """
-    await _send(email_to, f"Critical Stock Alert: {product_name}", html)
+    await _send(
+        email_to,
+        f"URGENT: {product_name} is critically low at {branch_name} ({quantity} units left)",
+        html
+    )

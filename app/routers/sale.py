@@ -1,8 +1,9 @@
+import logging
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime, timedelta
-from app.core.rate_limit import limiter  # <--- NEW
+from app.core.rate_limit import limiter
 from app.models.sale import Sale, SaleItem, SaleStatus, PaymentMethod
 from app.models.product import Product
 from app.models.inventory import Inventory
@@ -18,8 +19,10 @@ from app.dependencies.auth import get_current_user
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip
+from app.core.email import send_low_stock_alert_email  # ✅ NEW
 
 router = APIRouter()
+logger = logging.getLogger(__name__)  # ✅ NEW
 
 # Roles that can create a sale
 SALE_ROLES = [
@@ -278,19 +281,13 @@ async def get_sale_quote(
 # 4. CREATE SALE
 # Called after quote, once customer has paid.
 # ==========================================
-
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_sale(
     sale_data: SaleCreate,
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Sales Staff and Store Manager only
-     Selects items and payment method.
-    System calculates everything else.
-    No amount_paid. No discount. Clean and simple.
-    """
+    """Sales Staff and Store Manager only."""
     if current_user.role not in SALE_ROLES:
         raise HTTPException(
             status_code=403,
@@ -359,10 +356,8 @@ async def create_sale(
             line_total=line_total
         ))
 
-    # System calculates tax — no discount at this stage
     tax = subtotal * sys_settings.vat_rate
     total_amount = subtotal + tax
-
     sale_number = generate_sale_number(branch.code)
 
     new_sale = Sale(
@@ -376,7 +371,7 @@ async def create_sale(
         tax=round(tax, 2),
         total_amount=round(total_amount, 2),
         payment_method=sale_data.payment_method,
-        amount_paid=round(total_amount, 2),  # system sets this = total
+        amount_paid=round(total_amount, 2),
         change_given=0.0,
         status=SaleStatus.COMPLETED,
         till_number=sale_data.till_number,
@@ -384,7 +379,7 @@ async def create_sale(
     )
     await new_sale.insert()
 
-    # Deduct inventory
+    # ✅ Deduct inventory + trigger low stock alert
     for item in sale_data.items:
         inventory = await Inventory.find_one({
             "product_id": str(item.product_id),
@@ -394,6 +389,57 @@ async def create_sale(
             inventory.quantity -= item.quantity
             inventory.updated_at = datetime.utcnow()
             await inventory.save()
+
+            # ✅ Check critical stock after deduction
+            is_critical = inventory.quantity <= sys_settings.critical_stock_threshold
+            if is_critical:
+                try:
+                    # Notify Store Manager of this branch
+                    store_managers = await User.find(
+                        User.role == UserRole.STORE_MANAGER,
+                        User.branch_id == current_user.branch_id,
+                        User.is_active == True
+                    ).to_list()
+                    for manager in store_managers:
+                        await send_low_stock_alert_email(
+                            email_to=manager.email,
+                            first_name=manager.first_name,
+                            product_name=inventory.product_name,
+                            branch_name=branch.name,
+                            quantity=inventory.quantity,
+                            role="Store Manager"
+                        )
+                        logger.info(
+                            f"Low stock alert → Store Manager {manager.email} | "
+                            f"{inventory.product_name} at {branch.name} "
+                            f"({inventory.quantity} units left)"
+                        )
+
+                    # Notify ALL Purchase Managers
+                    purchase_managers = await User.find(
+                        User.role == UserRole.PURCHASE,
+                        User.is_active == True
+                    ).to_list()
+                    for pm in purchase_managers:
+                        await send_low_stock_alert_email(
+                            email_to=pm.email,
+                            first_name=pm.first_name,
+                            product_name=inventory.product_name,
+                            branch_name=branch.name,
+                            quantity=inventory.quantity,
+                            role="Purchase Manager"
+                        )
+                        logger.info(
+                            f"Low stock alert → Purchase Manager {pm.email} | "
+                            f"{inventory.product_name} at {branch.name} "
+                            f"({inventory.quantity} units left)"
+                        )
+
+                except Exception as e:
+                    logger.error(
+                        f"Low stock alert failed for "
+                        f"{inventory.product_name}: {e}"
+                    )
 
     await log_action(
         user=current_user,

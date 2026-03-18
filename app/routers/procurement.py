@@ -112,7 +112,7 @@ async def create_po(
         ip_address=extract_ip(request)
     )
 
-    # ✅ Notify Finance Managers if PO needs approval
+    # Notify Finance Managers if PO needs approval
     if status_value == POStatus.PENDING_APPROVAL:
         try:
             finance_managers = await User.find(
