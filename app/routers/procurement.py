@@ -1,10 +1,9 @@
-from multiprocessing.dummy import Manager
-
+import logging
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 from datetime import datetime
 from uuid import UUID
 from typing import List
-from app.core.rate_limit import limiter  # <--- NEW
+from app.core.rate_limit import limiter
 from app.models.purchase_order import PurchaseOrder, POStatus, POItem
 from app.models.inventory import Inventory
 from app.models.product import Product
@@ -17,8 +16,14 @@ from app.models.user import User, UserRole
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip
+from app.core.email import (
+    send_po_pending_email,
+    send_po_approved_email,
+    send_po_rejected_email
+)
 
 router = APIRouter(prefix="/procurement", tags=["Procurement"])
+logger = logging.getLogger(__name__)
 
 
 async def get_settings() -> SystemSettings:
@@ -30,13 +35,13 @@ async def get_settings() -> SystemSettings:
 # 1. CREATE PURCHASE ORDER
 # ==========================================
 @router.post("/create", response_model=dict, status_code=status.HTTP_201_CREATED)
-@limiter.limit("10/minute")  # <--- NEW: Limit to 10 PO creation attempts per minute per IP
+@limiter.limit("10/minute")
 async def create_po(
     data: POCreateSchema,
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    "Purchase Manager only.** Creates a PO for a supplier targeting a specific branch. POs under the approval threshold are sent automatically. POs above the threshold require Finance Manager approval. Validates supplier and branch existence and logs the creation action."
+    """Purchase Manager only. Creates a PO for a supplier targeting a specific branch."""
     if current_user.role != UserRole.PURCHASE:
         raise HTTPException(status_code=403, detail="Access Denied: Only Purchase Managers can create Purchase Orders")
 
@@ -50,7 +55,6 @@ async def create_po(
     if not branch:
         raise HTTPException(status_code=404, detail="Target branch not found")
 
-    # ✅ Get threshold from system settings
     sys_settings = await get_settings()
     threshold = sys_settings.po_approval_threshold
 
@@ -108,6 +112,24 @@ async def create_po(
         ip_address=extract_ip(request)
     )
 
+    # ✅ Notify Finance Managers if PO needs approval
+    if status_value == POStatus.PENDING_APPROVAL:
+        try:
+            finance_managers = await User.find(
+                User.role == UserRole.FINANCE,
+                User.is_active == True
+            ).to_list()
+            for fm in finance_managers:
+                await send_po_pending_email(
+                    email_to=fm.email,
+                    first_name=fm.first_name,
+                    supplier_name=supplier.name,
+                    amount=total_amount,
+                    po_id=str(po.id)
+                )
+        except Exception as e:
+            logger.error(f"PO pending approval email failed: {e}")
+
     return {
         "message": message,
         "po_id": str(po.id),
@@ -126,9 +148,7 @@ async def approve_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Finance Manager only.** Approves a pending PO. Validates that the PO is in the correct status for approval. Updates the PO status and logs the approval action with details about the order and supplier.
-    """
+    """Finance Manager only. Approves a pending PO."""
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Access Denied: Only Finance Managers can approve orders")
 
@@ -137,7 +157,10 @@ async def approve_po(
         raise HTTPException(status_code=404, detail="Purchase Order not found")
 
     if po.status != POStatus.PENDING_APPROVAL:
-        raise HTTPException(status_code=400, detail=f"Cannot approve. Current status is '{po.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot approve. Current status is '{po.status.value}'"
+        )
 
     po.status = POStatus.APPROVED
     po.approved_by = current_user.user_id
@@ -152,14 +175,31 @@ async def approve_po(
         description=f"Approved PO worth ₦{po.total_amount:,.2f} from {supplier.name if supplier else 'Unknown'}",
         target_id=str(po.id),
         target_type="purchase_order",
-        metadata={"total_amount": po.total_amount, "supplier": supplier.name if supplier else None},
+        metadata={
+            "total_amount": po.total_amount,
+            "supplier": supplier.name if supplier else None
+        },
         ip_address=extract_ip(request)
     )
+
+    # ✅ Notify the Purchase Manager who created the PO
+    try:
+        creator = await User.find_one(User.user_id == po.created_by)
+        if creator:
+            await send_po_approved_email(
+                email_to=creator.email,
+                first_name=creator.first_name,
+                supplier_name=supplier.name if supplier else "Unknown",
+                amount=po.total_amount,
+                po_id=str(po.id)
+            )
+    except Exception as e:
+        logger.error(f"PO approved email failed: {e}")
 
     return {
         "message": "Purchase Order approved successfully",
         "po_id": str(po.id),
-        "status": po.status,
+        "status": po.status.value,
         "approved_by": str(current_user.user_id)
     }
 
@@ -173,9 +213,7 @@ async def reject_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Finance Manager only.** Rejects a pending PO. Validates that the PO is in the correct status for rejection. Updates the PO status and logs the rejection action with details about the order and supplier.
-    """
+    """Finance Manager only. Rejects a pending PO."""
     if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Access Denied: Only Finance Managers can reject orders")
 
@@ -184,7 +222,10 @@ async def reject_po(
         raise HTTPException(status_code=404, detail="Purchase Order not found")
 
     if po.status != POStatus.PENDING_APPROVAL:
-        raise HTTPException(status_code=400, detail="Only pending orders can be rejected")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reject. Current status is '{po.status.value}'"
+        )
 
     po.status = POStatus.REJECTED
     await po.save()
@@ -202,7 +243,26 @@ async def reject_po(
         ip_address=extract_ip(request)
     )
 
-    return {"message": "Purchase Order rejected", "po_id": str(po.id), "status": po.status}
+    # ✅ Notify the Purchase Manager who created the PO
+    try:
+        creator = await User.find_one(User.user_id == po.created_by)
+        if creator:
+            await send_po_rejected_email(
+                email_to=creator.email,
+                first_name=creator.first_name,
+                supplier_name=supplier.name if supplier else "Unknown",
+                amount=po.total_amount,
+                po_id=str(po.id),
+                reason="No reason provided"
+            )
+    except Exception as e:
+        logger.error(f"PO rejected email failed: {e}")
+
+    return {
+        "message": "Purchase Order rejected",
+        "po_id": str(po.id),
+        "status": po.status.value
+    }
 
 
 # ==========================================
@@ -215,9 +275,7 @@ async def receive_goods(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Store Staff and Store Manager only.
-    """
+    """Store Staff and Store Manager only."""
     if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
         raise HTTPException(status_code=403, detail="Access Denied: Only Store Staff can receive goods")
 
@@ -234,7 +292,7 @@ async def receive_goods(
     if po.status not in [POStatus.SENT, POStatus.APPROVED]:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot receive goods. PO status is '{po.status}'. Must be 'Sent' or 'Approved'"
+            detail=f"Cannot receive goods. PO status is '{po.status.value}'. Must be 'Sent' or 'Approved'"
         )
 
     received_items_summary = []
@@ -245,7 +303,10 @@ async def receive_goods(
             None
         )
         if not po_item:
-            raise HTTPException(status_code=400, detail=f"Product {received_item.product_id} not found in this PO")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Product {received_item.product_id} not found in this PO"
+            )
 
         po_item.received_quantity += received_item.received_qty
 
@@ -308,157 +369,6 @@ async def receive_goods(
     return {
         "message": "Goods received and inventory updated successfully",
         "po_id": str(po.id),
-        "status": po.status,
+        "status": po.status.value,
         "items_received": len(data.items)
-    }
-
-
-# ==========================================
-# 5. GET ALL PURCHASE ORDERS
-# ==========================================
-@router.get("/", response_model=List[dict])
-async def get_purchase_orders(
-    po_status: POStatus = None,
-    page: int = 1,
-    limit: int = 50,
-    current_user: User = Depends(get_current_user)
-):
-    """Store Staff, Store Manager, and Admin.** Lists purchase orders with optional filtering by status. Supports pagination. Regular users see only orders for their branch, while admins can see all orders or filter by any branch."""
-    # Sales Staff have no business seeing POs
-    if current_user.role == UserRole.SALES_STAFF:
-        raise HTTPException(status_code=403, detail="Access Denied")
-
-    skip = (page - 1) * limit
-
-    # Admin, Finance, Purchase Manager see ALL POs
-    if current_user.role in [UserRole.ADMIN, UserRole.FINANCE, UserRole.PURCHASE]:
-        query_filter = {}
-        if po_status:
-            query_filter["status"] = po_status
-        orders = await PurchaseOrder.find(query_filter).skip(skip).limit(limit).to_list()
-
-    # Store Manager and Store Staff see only their branch's POs
-    else:
-        if not current_user.branch_id:
-            raise HTTPException(status_code=400, detail="No branch assigned to your account")
-        
-        query_filter = {"target_branch": current_user.branch_id}
-        if po_status:
-            query_filter["status"] = po_status
-        orders = await PurchaseOrder.find(query_filter).skip(skip).limit(limit).to_list()
-
-    return [
-        {
-            "id": str(o.id),
-            "supplier_id": str(o.supplier_id),
-            "target_branch": str(o.target_branch),
-            "total_amount": o.total_amount,
-            "status": o.status,
-            "created_at": o.created_at,
-            "created_by": str(o.created_by),
-            "items_count": len(o.items)
-        }
-        for o in orders
-    ]
-
-
-# ==========================================
-# 6. GET SINGLE PURCHASE ORDER
-# ==========================================
-@router.get("/{po_id}", response_model=dict)
-async def get_purchase_order(
-    po_id: UUID,
-    current_user: User = Depends(get_current_user)
-):
-    """Store Staff, Store Manager, and Admin.** Retrieves detailed information about a specific purchase order. Access is restricted to users whose branch is the target of the order or admins. Provides comprehensive details including supplier and branch names, product details, quantities, costs, timestamps, and user information."""
-    po = await PurchaseOrder.get(po_id)
-    if not po:
-        raise HTTPException(status_code=404, detail="Purchase Order not found")
-
-    role = current_user.role
-
-    if role in [UserRole.ADMIN, UserRole.FINANCE, UserRole.PURCHASE]:
-        pass
-    elif role == UserRole.STORE_MANAGER:
-        if not current_user.branch_id or str(po.target_branch) != str(current_user.branch_id):
-            raise HTTPException(status_code=403, detail="You can only view POs for your branch")
-    elif role == UserRole.STORE_STAFF:
-        if not current_user.branch_id or str(po.target_branch) != str(current_user.branch_id):
-            raise HTTPException(status_code=403, detail="This order is not for your branch")
-        if po.status not in [POStatus.SENT, POStatus.APPROVED]:
-            raise HTTPException(status_code=403, detail=f"Order not ready for receiving. Status: {po.status}")
-    else:
-        raise HTTPException(status_code=403, detail="You do not have permission to view Purchase Orders")
-
-    supplier = await Supplier.get(po.supplier_id)
-    branch = await Branch.get(po.target_branch)
-
-    items_detail = []
-    for item in po.items:
-        product = await Product.get(item.product_id)
-        items_detail.append({
-            "product_id": str(item.product_id),
-            "product_name": product.name if product else "Unknown",
-            "ordered_quantity": item.ordered_quantity,
-            "received_quantity": item.received_quantity,
-            "unit_cost": item.unit_cost,
-            "total_cost": item.total_cost,
-            "selling_price": product.price if product else None
-        })
-
-    return {
-        "id": str(po.id),
-        "supplier_name": supplier.name if supplier else "Unknown",
-        "supplier_id": str(po.supplier_id),
-        "target_branch_name": branch.name if branch else "Unknown",
-        "target_branch_id": str(po.target_branch),
-        "total_amount": po.total_amount,
-        "status": po.status,
-        "items": items_detail,
-        "created_at": po.created_at,
-        "created_by": str(po.created_by),
-        "approved_by": str(po.approved_by) if po.approved_by else None,
-        "received_at": po.received_at,
-        "receiving_notes": po.receiving_notes
-    }
-
-
-# ==========================================
-# 7. GET PENDING APPROVALS (Finance Only)
-# ==========================================
-@router.get("/pending/approvals", response_model=dict)
-async def get_pending_approvals(
-    page: int = 1,
-    limit: int = 50,
-    current_user: User = Depends(get_current_user)
-):
-    """Finance Manager only. Paginated list of POs pending approval."""
-    if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
-        raise HTTPException(status_code=403, detail="Access Denied")
-
-    total = await PurchaseOrder.find(PurchaseOrder.status == POStatus.PENDING_APPROVAL).count()
-    skip = (page - 1) * limit
-    pending_orders = await PurchaseOrder.find(
-        PurchaseOrder.status == POStatus.PENDING_APPROVAL
-    ).skip(skip).limit(limit).to_list()
-
-    result = []
-    for order in pending_orders:
-        supplier = await Supplier.get(order.supplier_id)
-        branch = await Branch.get(order.target_branch)
-        result.append({
-            "id": str(order.id),
-            "supplier_name": supplier.name if supplier else "Unknown",
-            "target_branch": branch.name if branch else "Unknown",
-            "total_amount": order.total_amount,
-            "created_at": order.created_at,
-            "items_count": len(order.items)
-        })
-
-    return {
-        "total": total,
-        "page": page,
-        "limit": limit,
-        "pages": (total + limit - 1) // limit,
-        "data": result
     }

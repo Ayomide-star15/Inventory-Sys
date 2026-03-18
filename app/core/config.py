@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
 class Settings(BaseSettings):
-    APP_NAME: str  # ← FIXED: was APP_NAME, but main.py uses PROJECT_NAME
+    APP_NAME: str
     DEBUG: bool = False
 
     # Database
@@ -14,15 +14,16 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
-    # Frontend 
+    # Frontend
     FRONTEND_URL: str = "http://localhost:3000"
 
     # CORS
     CORS_ORIGINS: List[str] = ["*"]
 
-    # Email
-    SENDER_EMAIL: str | None = None
-    SENDER_PASSWORD: str | None = None
+    # SendGrid
+    SENDGRID_API_KEY: str = ""
+    MAIL_FROM: str = ""
+    MAIL_FROM_NAME: str = "Inventory Management System"
 
     # Admin
     ADMIN_EMAIL_1: str | None = None

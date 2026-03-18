@@ -1,8 +1,9 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
-from app.core.rate_limit import limiter  # <--- NEW
+from app.core.rate_limit import limiter
 from app.dependencies.auth import get_current_user
 from app.models.user import User, UserRole
 from app.models.stock_transfer import StockTransfer, TransferStatus
@@ -16,12 +17,17 @@ from app.schemas.stock_transfer import (
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip
+from app.core.email import (
+    send_transfer_request_email,
+    send_transfer_approved_email
+)
 
 router = APIRouter(prefix="/stock-transfers", tags=["Stock Transfers"])
+logger = logging.getLogger(__name__)
 
 
 # ==========================================
-# 1. CREATE TRANSFER
+# 1. CREATE TRANSFER REQUEST
 # ==========================================
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
@@ -33,15 +39,12 @@ async def create_transfer_request(
     if current_user.role != UserRole.STORE_MANAGER:
         raise HTTPException(status_code=403, detail="Only Store Managers can create transfer requests")
 
-    # ✅ CHANGED: The manager creates a request TO their own branch
-    # They are the destination — they're asking for stock
     if str(transfer_data.to_branch_id) != str(current_user.branch_id):
         raise HTTPException(
             status_code=403,
             detail="You can only request stock INTO your own branch"
         )
 
-    # ✅ CHANGED: Cannot request from your own branch
     if transfer_data.from_branch_id == transfer_data.to_branch_id:
         raise HTTPException(status_code=400, detail="Cannot transfer from your own branch to itself")
 
@@ -57,30 +60,26 @@ async def create_transfer_request(
         if not product:
             raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
 
-        # ✅ CHANGED: Check stock at the SOURCE branch (the one being asked)
-        # We check availability here as an early warning, but the real check
-        # happens at ship time — stock could change between request and approval
         inventory = await Inventory.find_one({
             "product_id": str(item.product_id),
             "branch_id": str(transfer_data.from_branch_id)
         })
 
-        # ✅ CHANGED: Warn but don't block — the source manager will decide
         available_qty = inventory.quantity if inventory else 0
 
         items.append({
             "product_id": str(item.product_id),
             "product_name": product.name,
             "quantity_requested": item.quantity,
-            "quantity_available_at_source": available_qty,  # informational
+            "quantity_available_at_source": available_qty,
             "quantity_approved": 0,
             "quantity_sent": 0,
             "quantity_received": 0
         })
 
     new_transfer = StockTransfer(
-        from_branch_id=transfer_data.from_branch_id,   # branch being asked
-        to_branch_id=transfer_data.to_branch_id,        # requesting branch (current user)
+        from_branch_id=transfer_data.from_branch_id,
+        to_branch_id=transfer_data.to_branch_id,
         items=items,
         reason=transfer_data.reason,
         priority=transfer_data.priority,
@@ -108,14 +107,32 @@ async def create_transfer_request(
         ip_address=extract_ip(request)
     )
 
+    # ✅ Notify source branch managers about the request
+    try:
+        source_managers = await User.find(
+            User.role == UserRole.STORE_MANAGER,
+            User.branch_id == transfer_data.from_branch_id,
+            User.is_active == True
+        ).to_list()
+        for manager in source_managers:
+            await send_transfer_request_email(
+                email_to=manager.email,
+                first_name=manager.first_name,
+                requesting_branch=to_branch.name,
+                transfer_id=str(new_transfer.id)
+            )
+    except Exception as e:
+        logger.error(f"Transfer request email failed: {e}")
+
     return {
         "message": f"Transfer request sent to {from_branch.name}",
         "transfer_id": str(new_transfer.id),
         "requesting_branch": to_branch.name,
         "source_branch": from_branch.name,
-        "status": new_transfer.status,
+        "status": new_transfer.status.value,
         "items_count": len(items)
     }
+
 
 # ==========================================
 # 2. APPROVE TRANSFER
@@ -146,13 +163,11 @@ async def approve_transfer(
             detail=f"Cannot approve. Transfer status is '{transfer.status.value}'"
         )
 
-    # ✅ Fetch branch names for logging and response
     from_branch = await Branch.get(transfer.from_branch_id)
     to_branch = await Branch.get(transfer.to_branch_id)
     from_branch_name = from_branch.name if from_branch else "Unknown"
     to_branch_name = to_branch.name if to_branch else "Unknown"
 
-    # ✅ Auto-set approved quantities based on available stock
     for item in transfer.items:
         inventory = await Inventory.find_one({
             "product_id": item["product_id"],
@@ -160,13 +175,8 @@ async def approve_transfer(
         })
         available = inventory.quantity if inventory else 0
         requested = item["quantity_requested"]
+        item["quantity_approved"] = available if available < requested else requested
 
-        if available < requested:
-            item["quantity_approved"] = available
-        else:
-            item["quantity_approved"] = requested
-
-    # ✅ Override with manual quantities if the manager provided them
     if approval_data.approved_quantities:
         for approval in approval_data.approved_quantities:
             for item in transfer.items:
@@ -190,7 +200,7 @@ async def approve_transfer(
         user=current_user,
         action=AuditAction.TRANSFER_APPROVED,
         module=AuditModule.TRANSFERS,
-        description=f"Approved stock transfer request from {to_branch_name}",  # ✅ now defined
+        description=f"Approved stock transfer request from {to_branch_name}",
         target_id=str(transfer.id),
         target_type="stock_transfer",
         metadata={
@@ -202,10 +212,24 @@ async def approve_transfer(
         ip_address=extract_ip(request)
     )
 
+    # ✅ Notify the manager who requested the transfer
+    try:
+        requester = await User.find_one(User.user_id == transfer.requested_by)
+        if requester:
+            await send_transfer_approved_email(
+                email_to=requester.email,
+                first_name=requester.first_name,
+                from_branch=from_branch_name,
+                to_branch=to_branch_name,
+                transfer_id=str(transfer.id)
+            )
+    except Exception as e:
+        logger.error(f"Transfer approved email failed: {e}")
+
     return {
         "message": "Transfer request approved",
         "transfer_id": str(transfer.id),
-        "status": transfer.status.value,  # ✅ .value so it returns "APPROVED" not "TransferStatus.APPROVED"
+        "status": transfer.status.value,
         "from_branch": from_branch_name,
         "to_branch": to_branch_name,
         "items": [
@@ -218,10 +242,10 @@ async def approve_transfer(
         ]
     }
 
+
 # ==========================================
 # 3. SHIP TRANSFER
 # ==========================================
-
 @router.put("/{transfer_id}/ship", response_model=dict)
 async def ship_transfer(
     transfer_id: UUID,
@@ -229,7 +253,6 @@ async def ship_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    "Store Staff and Store Manager.** Marks an approved transfer as 'In Transit'. Validates that the user belongs to the source branch and that stock is still available. Logs the shipping action."
     if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
         raise HTTPException(status_code=403, detail="Only Store Staff can ship transfers")
 
@@ -243,7 +266,7 @@ async def ship_transfer(
     if transfer.status != TransferStatus.APPROVED:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot ship. Transfer must be 'Approved'. Current: '{transfer.status}'"
+            detail=f"Cannot ship. Transfer must be 'Approved'. Current: '{transfer.status.value}'"
         )
 
     for ship_item in ship_data.actual_quantities:
@@ -285,14 +308,13 @@ async def ship_transfer(
     return {
         "message": "Transfer shipped successfully",
         "transfer_id": str(transfer.id),
-        "status": transfer.status
+        "status": transfer.status.value
     }
 
 
 # ==========================================
 # 4. RECEIVE TRANSFER
 # ==========================================
-
 @router.put("/{transfer_id}/receive", response_model=dict)
 async def receive_transfer(
     transfer_id: UUID,
@@ -300,12 +322,6 @@ async def receive_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Store Staff and Store Manager only.
-    Marks an 'In Transit' transfer as 'Completed'.
-    Validates that the user belongs to the destination branch and updates inventory accordingly.
-    Logs the receiving action.
-    """
     if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
         raise HTTPException(status_code=403, detail="Only Store Staff can receive transfers")
 
@@ -319,7 +335,7 @@ async def receive_transfer(
     if transfer.status != TransferStatus.IN_TRANSIT:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot receive. Transfer must be 'In Transit'. Current: '{transfer.status}'"
+            detail=f"Cannot receive. Transfer must be 'In Transit'. Current: '{transfer.status.value}'"
         )
 
     for receive_item in receive_data.received_quantities:
@@ -376,14 +392,13 @@ async def receive_transfer(
     return {
         "message": "Transfer received successfully",
         "transfer_id": str(transfer.id),
-        "status": transfer.status
+        "status": transfer.status.value
     }
 
 
 # ==========================================
 # 5. REJECT TRANSFER
 # ==========================================
-
 @router.put("/{transfer_id}/reject", response_model=dict)
 async def reject_transfer(
     transfer_id: UUID,
@@ -398,7 +413,6 @@ async def reject_transfer(
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    # ✅ CHANGED: Source branch manager rejects (same as approve)
     if str(transfer.from_branch_id) != str(current_user.branch_id):
         raise HTTPException(
             status_code=403,
@@ -408,8 +422,13 @@ async def reject_transfer(
     if transfer.status != TransferStatus.PENDING:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot reject. Transfer status is '{transfer.status}'"
+            detail=f"Cannot reject. Transfer status is '{transfer.status.value}'"
         )
+
+    from_branch = await Branch.get(transfer.from_branch_id)
+    to_branch = await Branch.get(transfer.to_branch_id)
+    from_branch_name = from_branch.name if from_branch else "Unknown"
+    to_branch_name = to_branch.name if to_branch else "Unknown"
 
     transfer.status = TransferStatus.REJECTED
     transfer.rejection_reason = reject_data.rejection_reason
@@ -419,29 +438,37 @@ async def reject_transfer(
         user=current_user,
         action=AuditAction.TRANSFER_REJECTED,
         module=AuditModule.TRANSFERS,
-        description=f"Rejected stock transfer request. Reason: {reject_data.rejection_reason}",
+        description=f"Rejected stock transfer request from {to_branch_name}. Reason: {reject_data.rejection_reason}",
         target_id=str(transfer.id),
         target_type="stock_transfer",
+        metadata={
+            "from_branch": from_branch_name,
+            "to_branch": to_branch_name,
+            "rejection_reason": reject_data.rejection_reason,
+            "items_count": len(transfer.items)
+        },
+        branch_name=from_branch_name,
         ip_address=extract_ip(request)
     )
 
     return {
         "message": "Transfer request rejected",
         "transfer_id": str(transfer.id),
-        "status": transfer.status,
-        "reason": reject_data.rejection_reason
+        "status": transfer.status.value,
+        "from_branch": from_branch_name,
+        "to_branch": to_branch_name,
+        "rejection_reason": reject_data.rejection_reason
     }
+
+
 # ==========================================
 # 6. GET TRANSFER DETAILS
 # ==========================================
-
 @router.get("/{transfer_id}", response_model=dict)
 async def get_transfer_details(
     transfer_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
-    """Store Staff, Store Manager, and Admin.** Retrieves detailed information about a specific transfer request. Access is restricted to users whose branch is involved in the transfer or admins. Provides comprehensive details including branch names, product details, quantities at each stage, timestamps, and user information.
-    """
     transfer = await StockTransfer.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
@@ -459,7 +486,7 @@ async def get_transfer_details(
         "transfer_id": str(transfer.id),
         "from_branch": from_branch.name if from_branch else "Unknown",
         "to_branch": to_branch.name if to_branch else "Unknown",
-        "status": transfer.status,
+        "status": transfer.status.value,
         "priority": transfer.priority,
         "items": transfer.items,
         "reason": transfer.reason,
@@ -476,9 +503,8 @@ async def get_transfer_details(
 
 
 # ==========================================
-# 7. LIST TRANSFERS (with pagination)
+# 7. LIST TRANSFERS
 # ==========================================
-
 @router.get("/", response_model=List[dict])
 async def list_transfers(
     transfer_status: Optional[TransferStatus] = None,
@@ -487,7 +513,6 @@ async def list_transfers(
     limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
-    """Store Staff, Store Manager, and Admin.** Lists transfer requests with optional filtering by status and branch. Supports pagination. Regular users see only transfers involving their branch, while admins can see all transfers or filter by any branch."""
     query = {}
 
     if current_user.role != UserRole.ADMIN:
@@ -506,7 +531,9 @@ async def list_transfers(
         ]
 
     skip = (page - 1) * limit
-    transfers = await StockTransfer.find(query).sort(-StockTransfer.created_at).skip(skip).limit(limit).to_list()  # type: ignore
+    transfers = await StockTransfer.find(query).sort(
+        -StockTransfer.created_at
+    ).skip(skip).limit(limit).to_list()
 
     result = []
     for transfer in transfers:
@@ -518,7 +545,7 @@ async def list_transfers(
             "transfer_id": str(transfer.id),
             "from_branch": from_branch.name if from_branch else "Unknown",
             "to_branch": to_branch.name if to_branch else "Unknown",
-            "status": transfer.status,
+            "status": transfer.status.value,
             "priority": transfer.priority,
             "items_count": len(transfer.items),
             "total_quantity": total_qty,

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from typing import List
+import logging                          # ✅ ADDED
 from app.models.user import User
 from app.models.branch import Branch
 from app.schemas.user import (
@@ -10,7 +11,7 @@ from app.core.security import get_password_hash, create_invite_token, create_acc
 from app.dependencies.auth import get_admin_user, get_current_active_user
 from app.core.config import settings
 from app.core.email import send_invite_email, send_reset_password_email
-from app.core.rate_limit import limiter  # <--- NEW
+from app.core.rate_limit import limiter
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip
@@ -19,13 +20,14 @@ from jose import jwt, JWTError
 from uuid import UUID
 
 router = APIRouter()
+logger = logging.getLogger(__name__)    # ✅ ADDED
 
 
 # ---------------------------------------------------------
 # 1. INVITE NEW USER (Admin Only)
 # ---------------------------------------------------------
 @router.post("/admin/create-user", response_model=dict, status_code=status.HTTP_201_CREATED)
-@limiter.limit("10/minute")  # <--- NEW: Limit to 10 user creation attempts per minute per IP
+@limiter.limit("10/minute")
 async def create_user(
     request: Request,
     invite_data: UserInvite,
@@ -50,12 +52,31 @@ async def create_user(
     )
     await new_user.insert()
 
+    # ✅ FIXED — no longer deletes user if email fails
     try:
         token = create_invite_token(invite_data.email)
         await send_invite_email(invite_data.email, token)
     except Exception as e:
-        await new_user.delete()
-        raise HTTPException(status_code=500, detail="Email failed.")
+        logger.error(f"Invite email failed for {invite_data.email}: {e}")
+        await log_action(
+            user=admin,
+            action=AuditAction.USER_INVITED,
+            module=AuditModule.USERS,
+            description=f"Admin invited {invite_data.email} as {invite_data.role.value} (email failed)",
+            target_id=str(new_user.user_id),
+            target_type="user",
+            metadata={
+                "email": invite_data.email,
+                "role": invite_data.role.value,
+                "branch_id": str(invite_data.branch_id) if invite_data.branch_id else None
+            },
+            ip_address=extract_ip(request)
+        )
+        return {
+            "message": f"User {invite_data.email} created but invite email failed. Please resend manually.",
+            "user_id": str(new_user.user_id),
+            "email_sent": False
+        }
 
     await log_action(
         user=admin,
@@ -72,14 +93,18 @@ async def create_user(
         ip_address=extract_ip(request)
     )
 
-    return {"message": f"Invite sent successfully to {invite_data.email}"}
+    return {
+        "message": f"Invite sent successfully to {invite_data.email}",
+        "user_id": str(new_user.user_id),
+        "email_sent": True                  # ✅ ADDED
+    }
 
 
 # ---------------------------------------------------------
 # 2. SETUP PASSWORD
 # ---------------------------------------------------------
 @router.post("/setup-password", status_code=status.HTTP_200_OK)
-@limiter.limit("5/minute")  # <--- NEW: Limit to 5 password setup attempts per minute per IP
+@limiter.limit("5/minute")
 async def setup_password(request: Request, data: PasswordSetup):
     try:
         payload = jwt.decode(data.token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -118,8 +143,6 @@ async def setup_password(request: Request, data: PasswordSetup):
 # ---------------------------------------------------------
 @router.get("/", response_model=List[dict])
 async def list_users(admin: User = Depends(get_admin_user)):
-    """Admin only.** Retrieves a list of all users in the system with their details. This endpoint is intended for administrative oversight and user management purposes.
-    """ 
     users = await User.find_all().to_list()
     return [
         {
@@ -161,7 +184,7 @@ async def get_my_profile(current_user: User = Depends(get_current_active_user)):
 # 5. FORGOT PASSWORD
 # ---------------------------------------------------------
 @router.post("/forgot-password")
-@limiter.limit("5/minute")  # <--- NEW: Limit to 5 forgot password attempts per minute per IP
+@limiter.limit("5/minute")
 async def forgot_password(request: Request, req: ForgotPasswordRequest):
     user = await User.find_one(User.email == req.email)
     if not user:
@@ -173,11 +196,11 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest):
         expires_delta=access_token_expires
     )
 
+    # ✅ FIXED — no longer raises error when email fails
     try:
         await send_reset_password_email(user.email, reset_token, user.first_name)
     except Exception as e:
-        print(e)
-        raise HTTPException(status_code=500, detail="Email failed to send")
+        logger.error(f"Reset email failed for {user.email}: {e}")
 
     return {"message": "If that email exists, a reset link has been sent."}
 
@@ -186,7 +209,7 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest):
 # 6. RESET PASSWORD
 # ---------------------------------------------------------
 @router.post("/reset-password")
-@limiter.limit("5/minute")  # <--- NEW: Limit to 5 reset password attempts per minute per IP
+@limiter.limit("5/minute")
 async def reset_password(request: Request, req: ResetPasswordRequest):
     try:
         payload = jwt.decode(req.token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -269,7 +292,6 @@ async def update_user(
 
     await user.save()
 
-    # Determine most significant action for audit
     if "role" in changes:
         action = AuditAction.USER_ROLE_CHANGED
         description = f"Changed {user.first_name}'s role from {old_values['role']} to {changes['role']}"
