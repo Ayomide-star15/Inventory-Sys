@@ -10,15 +10,16 @@ from app.models.system_settings import SystemSettings
 from app.schemas.inventory import StockAdjustmentSchema
 from app.models.branch import Branch
 from app.models.product import Product
-from app.core.email import send_low_stock_alert_email  # ✅ NEW
+from app.utils.stock_alerts import check_and_send_stock_alerts  # ✅ UPDATED
 
 router = APIRouter(tags=["Inventory Management"])
-logger = logging.getLogger(__name__)  # ✅ NEW
+logger = logging.getLogger(__name__)
 
 
 async def get_settings() -> SystemSettings:
     s = await SystemSettings.find_one({})
     return s if s else SystemSettings()
+
 
 @router.post("/adjust", status_code=200)
 @limiter.limit("10/minute")
@@ -30,8 +31,7 @@ async def adjust_stock(
     """
     Adjust stock levels (remove stock for damage, theft, etc.)
     Only Store Managers can perform this action.
-    Triggers low stock email to Store Manager + Purchase Managers
-    if stock drops to or below critical threshold.
+    Triggers two-tier stock alert emails after deduction.
     """
     if current_user.role != UserRole.STORE_MANAGER:
         raise HTTPException(
@@ -80,63 +80,9 @@ async def adjust_stock(
     )
     await log.save()
 
-    # ✅ Check critical stock and notify Store Manager + Purchase Managers
+    # ✅ Two-tier stock alert check
     sys_settings = await get_settings()
-    is_critical = inventory.quantity <= sys_settings.critical_stock_threshold
-
-    if is_critical:
-        try:
-            branch = await Branch.get(user_branch_id)
-            branch_name = branch.name if branch else "Unknown"
-
-            # Notify Store Manager of this branch
-            store_managers = await User.find(
-                User.role == UserRole.STORE_MANAGER,
-                User.branch_id == user_branch_id,
-                User.is_active == True
-            ).to_list()
-
-            for manager in store_managers:
-                await send_low_stock_alert_email(
-                    email_to=manager.email,
-                    first_name=manager.first_name,
-                    product_name=inventory.product_name,
-                    branch_name=branch_name,
-                    quantity=inventory.quantity,
-                    role="Store Manager"
-                )
-                logger.info(
-                    f"Low stock alert sent to Store Manager "
-                    f"{manager.email} for {inventory.product_name} "
-                    f"at {branch_name} ({inventory.quantity} units left)"
-                )
-
-            # Notify ALL Purchase Managers system-wide
-            purchase_managers = await User.find(
-                User.role == UserRole.PURCHASE,
-                User.is_active == True
-            ).to_list()
-
-            for pm in purchase_managers:
-                await send_low_stock_alert_email(
-                    email_to=pm.email,
-                    first_name=pm.first_name,
-                    product_name=inventory.product_name,
-                    branch_name=branch_name,
-                    quantity=inventory.quantity,
-                    role="Purchase Manager"
-                )
-                logger.info(
-                    f"Low stock alert sent to Purchase Manager "
-                    f"{pm.email} for {inventory.product_name} "
-                    f"at {branch_name} ({inventory.quantity} units left)"
-                )
-
-        except Exception as e:
-            logger.error(
-                f"Low stock alert email failed after adjustment "
-                f"for {inventory.product_name}: {e}"
-            )
+    await check_and_send_stock_alerts(inventory, user_branch_id, sys_settings)
 
     return {
         "message": "Stock adjusted successfully",
@@ -145,24 +91,16 @@ async def adjust_stock(
         "quantity_removed": data.quantity,
         "new_quantity": inventory.quantity,
         "reason": data.reason,
-        "low_stock_alert": is_critical,
-        "alert_message": (
-            f"CRITICAL: Only {inventory.quantity} unit(s) remaining. "
-            f"Store Manager and Purchase Managers have been notified."
-        ) if is_critical else None
+        "low_stock_alert": inventory.quantity <= inventory.reorder_point,
+        "critical_alert": inventory.quantity <= sys_settings.critical_stock_threshold,
     }
+
 
 @router.get("/history/{branch_id}", response_model=list)
 async def get_adjustment_history(
     branch_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get adjustment history for a specific branch.
-    Store Managers can only view their own branch. Admins and Finance Managers can view all branches.
-    """
-
-    #FIXED: Use UserRole enum constants throughout
     if current_user.role == UserRole.STORE_MANAGER:
         if str(current_user.branch_id) != str(branch_id):
             raise HTTPException(
@@ -207,6 +145,7 @@ async def get_low_stock_items(
         "data": low_stock_items
     }
 
+
 @router.get("/{branch_id}", response_model=dict)
 async def get_branch_inventory(
     branch_id: str,
@@ -220,7 +159,10 @@ async def get_branch_inventory(
     """
     if current_user.role in [UserRole.STORE_MANAGER, UserRole.STORE_STAFF, UserRole.SALES_STAFF]:
         if str(current_user.branch_id) != str(branch_id):
-            raise HTTPException(status_code=403, detail="You can only view inventory for your assigned branch")
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view inventory for your assigned branch"
+            )
 
     total = await Inventory.find(Inventory.branch_id == branch_id).count()
     skip = (page - 1) * limit
@@ -236,63 +178,16 @@ async def get_branch_inventory(
         "data": inventory_items
     }
 
-# ==========================================
-# GET ADJUSTMENT HISTORY - Single Branch
-# (Fixed: now has proper role checks)
-# ==========================================
-@router.get("/history/{branch_id}", response_model=list)
-async def get_adjustment_history(
-    branch_id: UUID,
-    page: int = 1,
-    limit: int = 50,
-    current_user: User = Depends(get_current_user)
-):
-    # Admin and Finance can view any branch
-    if current_user.role in [UserRole.ADMIN, UserRole.FINANCE]:
-        pass
-    # Store Manager can only view their own branch
-    elif current_user.role == UserRole.STORE_MANAGER:
-        if str(current_user.branch_id) != str(branch_id):
-            raise HTTPException(status_code=403, detail="You can only view your own branch adjustment logs")
-    else:
-        raise HTTPException(status_code=403, detail="Access Denied")
 
-    skip = (page - 1) * limit
-    logs = await AdjustmentLog.find(
-        AdjustmentLog.branch_id == branch_id
-    ).sort(-AdjustmentLog.date).skip(skip).limit(limit).to_list()
-
-    result = []
-    for log in logs:
-        product = await Product.get(log.product_id)
-        user = await User.find_one(User.user_id == log.user_id)
-        result.append({
-            "id": str(log.id),
-            "product_id": str(log.product_id),
-            "product_name": product.name if product else "Unknown",
-            "quantity_removed": log.quantity_removed,
-            "reason": log.reason,
-            "note": log.note,
-            "adjusted_by": f"{user.first_name} {user.last_name}" if user else "Unknown",
-            "date": log.date
-        })
-
-    return result
-
-
-# ==========================================
-# GET ALL ADJUSTMENT LOGS - All Branches
-# (New: Admin and Finance only)
-# ==========================================
 @router.get("/adjustments/all", response_model=dict)
 async def get_all_adjustment_logs(
-    branch_id: UUID = None,   # optional filter by branch
-    reason: str = None,       # optional filter by reason e.g. "theft"
+    branch_id: UUID = None,
+    reason: str = None,
     page: int = 1,
     limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
-    """Admin and Finance only.** Retrieves all stock adjustment logs across branches with optional filtering by branch and reason. Provides pagination support. This endpoint is intended for high-level oversight and auditing of stock adjustments across the entire organization."""
+    """Admin and Finance only. All stock adjustment logs across branches."""
     if current_user.role not in [UserRole.ADMIN, UserRole.FINANCE]:
         raise HTTPException(status_code=403, detail="Access Denied: Admin and Finance only")
 
@@ -304,7 +199,9 @@ async def get_all_adjustment_logs(
 
     skip = (page - 1) * limit
     total = await AdjustmentLog.find(query_filter).count()
-    logs = await AdjustmentLog.find(query_filter).sort(-AdjustmentLog.date).skip(skip).limit(limit).to_list()
+    logs = await AdjustmentLog.find(query_filter).sort(
+        -AdjustmentLog.date
+    ).skip(skip).limit(limit).to_list()
 
     branches = await Branch.find_all().to_list()
     branch_map = {str(b.id): b.name for b in branches}

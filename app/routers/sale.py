@@ -19,18 +19,16 @@ from app.dependencies.auth import get_current_user
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip
-from app.core.email import send_low_stock_alert_email  # ✅ NEW
+from app.utils.stock_alerts import check_and_send_stock_alerts  # ✅ UPDATED
 
 router = APIRouter()
-logger = logging.getLogger(__name__)  # ✅ NEW
+logger = logging.getLogger(__name__)
 
-# Roles that can create a sale
 SALE_ROLES = [
     UserRole.SALES_STAFF,
     UserRole.STORE_MANAGER
 ]
 
-# Only these roles can apply a discount
 DISCOUNT_ROLES = [
     UserRole.ADMIN,
     UserRole.FINANCE
@@ -56,7 +54,7 @@ async def get_settings() -> SystemSettings:
 # ==========================================
 
 @router.get("/products", response_model=dict)
-@limiter.limit("60/minute")  # <--- NEW: Limit to 60 product search requests per minute per IP
+@limiter.limit("60/minute")
 async def get_products_for_sale(
     request: Request,
     search: Optional[str] = None,
@@ -113,6 +111,7 @@ async def get_products_for_sale(
         "data": result
     }
 
+
 # ==========================================
 # 2. SEARCH BY BARCODE
 # ==========================================
@@ -122,7 +121,6 @@ async def search_product_by_barcode(
     barcode: str,
     current_user: User = Depends(get_current_user)
 ):
-    "Sales Staff and Store Manager only.** Looks up a product by barcode at the cashier's branch. Returns an error if the product is out of stock."
     if current_user.role not in SALE_ROLES:
         raise HTTPException(status_code=403, detail="Access Denied")
 
@@ -160,8 +158,6 @@ async def search_product_by_barcode(
 
 # ==========================================
 # 3. QUOTE / PRICE PREVIEW
-# Called live as cashier adds items.
-# Nothing is saved. Safe to call repeatedly.
 # ==========================================
 
 @router.post("/quote", response_model=dict)
@@ -169,19 +165,12 @@ async def get_sale_quote(
     quote_data: QuoteRequest,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Sales Staff and Store Manager only
-    Returns full price breakdown before completing a sale.
-    Frontend calls this every time an item is added or removed.
-    No sale is created in the database.
-    """
     if current_user.role not in SALE_ROLES:
         raise HTTPException(status_code=403, detail="Access Denied")
 
     if not current_user.branch_id:
         raise HTTPException(status_code=400, detail="No branch assigned")
 
-    # Only Admin and Finance can apply discounts
     if quote_data.discount > 0 and current_user.role not in DISCOUNT_ROLES:
         raise HTTPException(
             status_code=403,
@@ -197,10 +186,7 @@ async def get_sale_quote(
     for item in quote_data.items:
         product = await Product.get(item.product_id)
         if not product:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Product {item.product_id} not found"
-            )
+            raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
 
         inventory = await Inventory.find_one({
             "product_id": str(item.product_id),
@@ -240,13 +226,9 @@ async def get_sale_quote(
             "available_quantity": inventory.quantity
         })
 
-    # Validate discount amount
     if quote_data.discount > 0:
         if quote_data.discount > subtotal:
-            raise HTTPException(
-                status_code=400,
-                detail="Discount cannot exceed subtotal"
-            )
+            raise HTTPException(status_code=400, detail="Discount cannot exceed subtotal")
         max_allowed = subtotal * (sys_settings.max_discount_percentage / 100)
         if quote_data.discount > max_allowed:
             raise HTTPException(
@@ -257,7 +239,6 @@ async def get_sale_quote(
                        f"{sys_settings.currency_symbol}{max_allowed:,.2f}"
             )
 
-    # Discount first, then tax on discounted amount
     discounted_subtotal = subtotal - quote_data.discount
     tax = discounted_subtotal * sys_settings.vat_rate
     total_amount = discounted_subtotal + tax
@@ -272,22 +253,20 @@ async def get_sale_quote(
         "total_amount": round(total_amount, 2),
         "currency_symbol": sys_settings.currency_symbol,
         "items_count": len(items_preview),
-        # Frontend uses this list to build the payment method dropdown
         "payment_methods": [m.value for m in PaymentMethod]
     }
 
 
 # ==========================================
 # 4. CREATE SALE
-# Called after quote, once customer has paid.
 # ==========================================
+
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_sale(
     sale_data: SaleCreate,
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """Sales Staff and Store Manager only."""
     if current_user.role not in SALE_ROLES:
         raise HTTPException(
             status_code=403,
@@ -312,10 +291,7 @@ async def create_sale(
     for item in sale_data.items:
         product = await Product.get(item.product_id)
         if not product:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Product {item.product_id} not found"
-            )
+            raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
 
         inventory = await Inventory.find_one({
             "product_id": str(item.product_id),
@@ -379,7 +355,7 @@ async def create_sale(
     )
     await new_sale.insert()
 
-    # ✅ Deduct inventory + trigger low stock alert
+    # ✅ Deduct inventory and run two-tier stock alert check
     for item in sale_data.items:
         inventory = await Inventory.find_one({
             "product_id": str(item.product_id),
@@ -390,56 +366,9 @@ async def create_sale(
             inventory.updated_at = datetime.utcnow()
             await inventory.save()
 
-            # ✅ Check critical stock after deduction
-            is_critical = inventory.quantity <= sys_settings.critical_stock_threshold
-            if is_critical:
-                try:
-                    # Notify Store Manager of this branch
-                    store_managers = await User.find(
-                        User.role == UserRole.STORE_MANAGER,
-                        User.branch_id == current_user.branch_id,
-                        User.is_active == True
-                    ).to_list()
-                    for manager in store_managers:
-                        await send_low_stock_alert_email(
-                            email_to=manager.email,
-                            first_name=manager.first_name,
-                            product_name=inventory.product_name,
-                            branch_name=branch.name,
-                            quantity=inventory.quantity,
-                            role="Store Manager"
-                        )
-                        logger.info(
-                            f"Low stock alert → Store Manager {manager.email} | "
-                            f"{inventory.product_name} at {branch.name} "
-                            f"({inventory.quantity} units left)"
-                        )
-
-                    # Notify ALL Purchase Managers
-                    purchase_managers = await User.find(
-                        User.role == UserRole.PURCHASE,
-                        User.is_active == True
-                    ).to_list()
-                    for pm in purchase_managers:
-                        await send_low_stock_alert_email(
-                            email_to=pm.email,
-                            first_name=pm.first_name,
-                            product_name=inventory.product_name,
-                            branch_name=branch.name,
-                            quantity=inventory.quantity,
-                            role="Purchase Manager"
-                        )
-                        logger.info(
-                            f"Low stock alert → Purchase Manager {pm.email} | "
-                            f"{inventory.product_name} at {branch.name} "
-                            f"({inventory.quantity} units left)"
-                        )
-
-                except Exception as e:
-                    logger.error(
-                        f"Low stock alert failed for "
-                        f"{inventory.product_name}: {e}"
-                    )
+            await check_and_send_stock_alerts(
+                inventory, current_user.branch_id, sys_settings
+            )
 
     await log_action(
         user=current_user,
@@ -499,19 +428,15 @@ async def list_sales(
     limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
-    "Sales Staff see only their own sales. Store Manager sees all sales at their branch. Admin and Finance see all sales system-wide"
     query = {}
 
     if current_user.role == UserRole.SALES_STAFF:
-        # Sales staff only see their own sales
         query["sold_by"] = current_user.user_id
     elif current_user.role == UserRole.STORE_MANAGER:
-        # Store manager sees all sales at their branch
         if not current_user.branch_id:
             raise HTTPException(status_code=400, detail="No branch assigned")
         query["branch_id"] = current_user.branch_id
     elif current_user.role in [UserRole.ADMIN, UserRole.FINANCE]:
-        # Admin and Finance see all sales system-wide
         pass
     else:
         raise HTTPException(status_code=403, detail="Access denied")
@@ -557,12 +482,10 @@ async def get_sale_details(
     sale_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
-    "Returns full details of a sale. Sales Staff can only view their own sales. Store Manager can only view sales at their branch."
     sale = await Sale.get(sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found")
 
-    # Role-based access
     if current_user.role == UserRole.SALES_STAFF:
         if sale.sold_by != current_user.user_id:
             raise HTTPException(status_code=403, detail="You can only view your own sales")
@@ -613,7 +536,6 @@ async def get_sale_details(
 async def get_todays_sales(
     current_user: User = Depends(get_current_user)
 ):
-    "Sales Staff and Store Manager only.** Returns a summary of today's sales at the cashier's branch. Sales Staff see only their own numbers"
     if current_user.role not in SALE_ROLES:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -629,7 +551,6 @@ async def get_todays_sales(
         "status": SaleStatus.COMPLETED
     }).to_list()
 
-    # Sales staff only see their own
     if current_user.role == UserRole.SALES_STAFF:
         sales = [s for s in sales if s.sold_by == current_user.user_id]
 
@@ -657,7 +578,6 @@ async def cancel_sale(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    "Store Manager and Sales Staff only.** Cancels a completed sale and restores the inventory for all items. Cancellation reason is required."
     if current_user.role not in [UserRole.STORE_MANAGER, UserRole.SALES_STAFF]:
         raise HTTPException(
             status_code=403,
@@ -680,7 +600,6 @@ async def cancel_sale(
     sale.cancellation_reason = cancel_data.cancellation_reason
     await sale.save()
 
-    # Restore inventory for each item
     branch_id_str = str(sale.branch_id)
     for item in sale.items:
         inventory = await Inventory.find_one({

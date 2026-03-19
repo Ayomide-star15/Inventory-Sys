@@ -213,10 +213,8 @@ async def send_transfer_approved_email(
 
 
 # ==========================================
-# 8. LOW STOCK ALERT
-# (Replaces old send_low_stock_email)
-# Notifies Store Manager AND Purchase Manager
-# with role-specific action instructions
+# 8. LOW STOCK ALERT — Tier 1
+# Fires when quantity <= reorder_point
 # ==========================================
 async def send_low_stock_alert_email(
     email_to: str,
@@ -240,7 +238,7 @@ async def send_low_stock_alert_email(
         <strong>{branch_name}</strong> immediately before
         stock runs out completely.
         """
-        color = "#e74c3c"
+        color = "#e67e22"
         action_title = "Raise a Purchase Order"
 
     html = f"""
@@ -248,65 +246,44 @@ async def send_low_stock_alert_email(
       <div style="background:#f4f4f4;padding:20px;">
         <div style="background:white;padding:20px;border-radius:8px;
                     max-width:500px;margin:auto;border-top:4px solid {color};">
-
           <h2 style="color:{color};margin-top:0;">
-            Critical Stock Alert
+            Low Stock Alert
           </h2>
-
           <p>Hello {first_name},</p>
-          <p>A product at one of your branches has reached a
-             <strong>critical stock level</strong> and requires
-             your immediate attention.</p>
-
-          <!-- Product & Branch Info Box -->
-          <div style="background:#fff8f8;border:1px solid {color};
+          <p>A product at one of your branches has reached its
+             <strong>reorder point</strong> and needs attention.</p>
+          <div style="background:#fff8f0;border:1px solid {color};
                       padding:16px;border-radius:8px;margin:16px 0;">
             <table style="width:100%;font-size:14px;">
               <tr>
-                <td style="color:#888;padding:4px 0;width:40%;">
-                  Product:
-                </td>
-                <td style="font-weight:bold;color:#333;padding:4px 0;">
-                  {product_name}
-                </td>
+                <td style="color:#888;padding:4px 0;width:40%;">Product:</td>
+                <td style="font-weight:bold;color:#333;padding:4px 0;">{product_name}</td>
               </tr>
               <tr>
                 <td style="color:#888;padding:4px 0;">Branch:</td>
-                <td style="font-weight:bold;color:#333;padding:4px 0;">
-                  {branch_name}
-                </td>
+                <td style="font-weight:bold;color:#333;padding:4px 0;">{branch_name}</td>
               </tr>
               <tr>
-                <td style="color:#888;padding:4px 0;">
-                  Stock Remaining:
-                </td>
+                <td style="color:#888;padding:4px 0;">Stock Remaining:</td>
                 <td style="padding:4px 0;">
-                  <span style="color:{color};font-size:20px;
-                               font-weight:bold;">
+                  <span style="color:{color};font-size:20px;font-weight:bold;">
                     {quantity} unit(s)
                   </span>
                 </td>
               </tr>
             </table>
           </div>
-
-          <!-- Action Required -->
-          <div style="background:#f8f8f8;padding:12px 16px;
-                      border-radius:6px;margin:16px 0;">
+          <div style="background:#f8f8f8;padding:12px 16px;border-radius:6px;margin:16px 0;">
             <p style="margin:0;font-size:13px;">
-              <strong style="color:{color};">
-                Action Required — {action_title}
-              </strong><br><br>
-              {action_text}
+              <strong style="color:{color};">Action Required — {action_title}</strong>
+              <br><br>{action_text}
             </p>
           </div>
-
           <p style="font-size:11px;color:#999;margin-top:24px;
                     border-top:1px solid #eee;padding-top:12px;">
             This is an automated alert from {settings.MAIL_FROM_NAME}.<br>
             Triggered when stock at <strong>{branch_name}</strong>
-            dropped to {quantity} unit(s) of
-            <strong>{product_name}</strong>.
+            dropped to {quantity} unit(s) of <strong>{product_name}</strong>.
           </p>
         </div>
       </div>
@@ -314,6 +291,78 @@ async def send_low_stock_alert_email(
     """
     await _send(
         email_to,
-        f"URGENT: {product_name} is critically low at {branch_name} ({quantity} units left)",
+        f"Low Stock Alert: {product_name} is low at {branch_name} ({quantity} units left)",
+        html
+    )
+
+
+# ==========================================
+# 9. CRITICAL STOCK ALERT — Tier 2
+# Fires when quantity <= critical_stock_threshold
+# ==========================================
+async def send_critical_stock_alert_email(
+    email_to: str,
+    first_name: str,
+    product_name: str,
+    branch_name: str,
+    quantity: int,
+    role: str
+):
+    if role == "Store Manager":
+        action_text = (
+            f"Request an <strong>emergency stock transfer</strong> to "
+            f"<strong>{branch_name}</strong> immediately. This product is nearly gone."
+        )
+    else:
+        action_text = (
+            f"Raise an <strong>urgent Purchase Order</strong> for "
+            f"<strong>{product_name}</strong> targeting <strong>{branch_name}</strong>. "
+            f"Stock is critically low."
+        )
+
+    color = "#A32D2D"
+
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;color:#333;">
+      <div style="background:#f4f4f4;padding:20px;">
+        <div style="background:white;padding:20px;border-radius:8px;
+                    max-width:500px;margin:auto;border-top:6px solid {color};">
+          <h2 style="color:{color};margin-top:0;">CRITICAL: Stock Almost Gone</h2>
+          <p>Hello {first_name},</p>
+          <div style="background:#fff0f0;border:1px solid {color};
+                      padding:16px;border-radius:8px;margin:16px 0;">
+            <table style="width:100%;font-size:14px;">
+              <tr>
+                <td style="color:#888;width:40%;padding:4px 0;">Product:</td>
+                <td style="font-weight:bold;padding:4px 0;">{product_name}</td>
+              </tr>
+              <tr>
+                <td style="color:#888;padding:4px 0;">Branch:</td>
+                <td style="font-weight:bold;padding:4px 0;">{branch_name}</td>
+              </tr>
+              <tr>
+                <td style="color:#888;padding:4px 0;">Units left:</td>
+                <td style="color:{color};font-size:22px;font-weight:bold;
+                           padding:4px 0;">{quantity}</td>
+              </tr>
+            </table>
+          </div>
+          <div style="background:#f8f8f8;padding:12px 16px;border-radius:6px;">
+            <p style="margin:0;font-size:13px;">
+              <strong style="color:{color};">Immediate action required:</strong>
+              <br><br>{action_text}
+            </p>
+          </div>
+          <p style="font-size:11px;color:#999;margin-top:24px;
+                    border-top:1px solid #eee;padding-top:12px;">
+            Automated critical alert from {settings.MAIL_FROM_NAME}.
+          </p>
+        </div>
+      </div>
+    </body></html>
+    """
+    await _send(
+        email_to,
+        f"CRITICAL — {product_name} has only {quantity} unit(s) left at {branch_name}",
         html
     )
