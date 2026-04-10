@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
 from app.core.config import settings
+from app.models.refresh_token import RefreshToken
 from app.models.system_settings import SystemSettings
 from app.models.audit_log import AuditLog
 from app.models.user import User
@@ -35,7 +36,8 @@ async def init_db():
             Sale,
             PriceHistory,  # ← ADD THIS
             AuditLog,  # ← ADD THIS
-            SystemSettings  # ← ADD THIS
+            SystemSettings,
+            RefreshToken  # ← ADD THIS
         ]
     )
     
