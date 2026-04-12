@@ -45,7 +45,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 # ──────────────────────────────────────────────────────────────
 
 def create_invite_token(email: str) -> str:
-    expire = datetime.utcnow() + timedelta(hours=24)
+    expire = datetime.utcnow() + timedelta(minutes=24)
     payload = {"exp": expire, "sub": email, "type": "invite"}
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
