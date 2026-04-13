@@ -1,90 +1,112 @@
-from pydantic import BaseModel, EmailStr, field_validator
+# app/schemas/product.py
+
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from uuid import UUID
 from datetime import datetime
 
-# === FOR CREATING PRODUCTS (Admin/PM only) ===
+
+# ==========================================
+# ADMIN: CREATE PRODUCT (no price)
+# ==========================================
 class ProductCreate(BaseModel):
-    """Only Admin/Purchase Manager can create with both prices"""
+    """
+    Admin only — catalog entry with no price.
+    Finance Manager sets selling price separately.
+    Cost price lives on each Purchase Order.
+    """
     name: str
     sku: str
     barcode: str
     description: Optional[str] = None
-    price: float  # Selling price
-    cost_price: float  # Cost price
     low_stock_threshold: int = 10
     category_id: UUID
     image_url: Optional[str] = None
-    
-    @field_validator('price', 'cost_price')
-    def validate_prices(cls, v):
-        if v <= 0:
-            raise ValueError('Price must be positive')
-        return v
+    # price and cost_price intentionally removed
 
-# === FOR UPDATING PRICES (Admin/PM only) ===
+
+# ==========================================
+# FINANCE MANAGER: SET / UPDATE SELLING PRICE
+# ==========================================
 class ProductPriceUpdate(BaseModel):
-    """Only Admin/PM can update prices"""
-    price: Optional[float] = None
-    cost_price: Optional[float] = None
+    """
+    Finance Manager only.
+    Sets or updates the global selling price for a product.
+    Cost price is referenced from the latest PO — not stored here.
+    """
+    price: float
+    reference_cost: Optional[float] = None   # from latest PO, used to calculate margin
     reason: Optional[str] = None
-    
-    @field_validator('price', 'cost_price')
-    def validate_prices(cls, v):
-        if v is not None and v <= 0:
-            raise ValueError('Price must be positive')
+
+    @field_validator('price')
+    def validate_price(cls, v):
+        if v <= 0:
+            raise ValueError('Selling price must be greater than zero')
         return v
 
-# === RESPONSE FOR REGULAR STAFF (NO cost_price) ===
+    @field_validator('reference_cost')
+    def validate_cost(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('Reference cost must be greater than zero')
+        return v
+
+
+# ==========================================
+# RESPONSE FOR REGULAR STAFF (no cost_price)
+# ==========================================
 class ProductResponseForStaff(BaseModel):
-    """Regular staff see selling price, NOT cost price"""
     id: UUID
     name: str
     sku: str
     barcode: str
     description: Optional[str]
-    price: float  # Visible to staff
+    price: Optional[float]          # None until Finance Manager sets it
     category_id: UUID
     image_url: Optional[str]
     low_stock_threshold: int
+    is_priced: bool                 # convenience flag for frontend
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
-# === RESPONSE FOR ADMIN/FINANCE (WITH cost_price + margin) ===
+
+# ==========================================
+# RESPONSE FOR ADMIN / FINANCE (with margin)
+# ==========================================
 class ProductResponseForAdmin(BaseModel):
-    """Admin sees both selling price AND cost price"""
     id: UUID
     name: str
     sku: str
     barcode: str
     description: Optional[str]
-    price: float
-    cost_price: float  # Admin only
-    margin_percentage: float  # Calculated
+    price: Optional[float]
+    cost_price: Optional[float]
+    margin_percentage: Optional[float]
     category_id: UUID
     image_url: Optional[str]
     low_stock_threshold: int
+    is_priced: bool
     created_at: datetime
     created_by: UUID
     updated_at: datetime
     updated_by: Optional[UUID]
     last_price_change: Optional[datetime]
     last_price_changed_by: Optional[UUID]
-    
+
     class Config:
         from_attributes = True
 
-# === PRICE HISTORY RESPONSE ===
+
+# ==========================================
+# PRICE HISTORY RESPONSE
+# ==========================================
 class PriceHistoryItem(BaseModel):
-    """Single price change record"""
     change_date: datetime
     change_type: str
     old_price: Optional[float]
     new_price: float
-    old_cost_price: Optional[float]
-    new_cost_price: Optional[float]
+    reference_cost: Optional[float]
     old_margin: Optional[float]
     new_margin: Optional[float]
     changed_by: str
@@ -92,12 +114,11 @@ class PriceHistoryItem(BaseModel):
     reason: Optional[str]
     effective_date: datetime
 
+
 class PriceHistoryResponse(BaseModel):
-    """Complete price history for a product"""
     product_id: UUID
     product_name: str
     sku: str
-    current_price: float
-    current_cost_price: float
+    current_price: Optional[float]
     total_changes: int
     history: List[PriceHistoryItem]

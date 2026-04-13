@@ -1,5 +1,7 @@
+# app/routers/product.py
+
 from fastapi import APIRouter, HTTPException, Depends, status, Request
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 from datetime import datetime
 import logging
@@ -8,12 +10,9 @@ from app.models.product import Product
 from app.models.category import Category
 from app.models.inventory import Inventory
 from app.models.price_history import PriceHistory, PriceChangeType
-from app.schemas.product import (
-    ProductCreate,
-    ProductPriceUpdate,
-)
+from app.schemas.product import ProductCreate, ProductPriceUpdate
 from app.models.user import User, UserRole
-from app.dependencies.auth import get_current_user, get_product_manager
+from app.dependencies.auth import get_current_user, get_admin_user
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip
@@ -22,163 +21,308 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ==========================================
-# 1. CREATE PRODUCT
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+# DEPENDENCIES
+# ─────────────────────────────────────────────────────────────
+
+async def get_finance_user(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """Only Finance Manager or Admin can set / update selling prices."""
+    if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: Only Finance Managers can set or update product prices."
+        )
+    if not current_user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive account.")
+    return current_user
+
+
+# ─────────────────────────────────────────────────────────────
+# 1. CREATE PRODUCT — Admin only, no price
+# ─────────────────────────────────────────────────────────────
 
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_product(
     product_data: ProductCreate,
     request: Request,
-    manager: User = Depends(get_product_manager)
+    admin: User = Depends(get_admin_user)   # Admin only
 ):
-    existing_barcode = await Product.find_one(Product.barcode == product_data.barcode)
-    if existing_barcode:
-        raise HTTPException(400, "Product with this barcode already exists")
+    """
+    Admin creates a product catalog entry — no price required.
 
-    existing_sku = await Product.find_one(Product.sku == product_data.sku)
-    if existing_sku:
-        raise HTTPException(400, "Product with this SKU already exists")
+    Workflow:
+    1. Admin creates product here (name, SKU, barcode, category)
+    2. Purchase Manager raises PO and enters cost price per unit
+    3. Finance Manager approves PO and sets global selling price
+    """
 
+    # Duplicate checks
+    if await Product.find_one(Product.barcode == product_data.barcode):
+        raise HTTPException(400, f"A product with barcode '{product_data.barcode}' already exists.")
+    if await Product.find_one(Product.sku == product_data.sku):
+        raise HTTPException(400, f"A product with SKU '{product_data.sku}' already exists.")
+
+    # Category must exist
     category = await Category.get(product_data.category_id)
     if not category:
-        raise HTTPException(404, "Category not found")
-
-    if product_data.price <= 0:
-        raise HTTPException(400, "Selling price must be positive")
-    if product_data.cost_price <= 0:
-        raise HTTPException(400, "Cost price must be positive")
-    if product_data.cost_price >= product_data.price:
-        raise HTTPException(400, "Cost price must be less than selling price")
+        raise HTTPException(404, "Category not found.")
 
     new_product = Product(
         name=product_data.name,
         sku=product_data.sku,
         barcode=product_data.barcode,
         description=product_data.description,
-        price=product_data.price,
-        cost_price=product_data.cost_price,
         low_stock_threshold=product_data.low_stock_threshold,
         category_id=product_data.category_id,
         image_url=product_data.image_url,
-        created_by=manager.user_id,
-        updated_by=manager.user_id
+        price=None,             # set later by Finance Manager
+        cost_price=None,        # reference updated when Finance Manager prices
+        created_by=admin.user_id,
+        updated_by=admin.user_id
     )
     await new_product.save()
 
-    margin = ((product_data.price - product_data.cost_price) / product_data.cost_price) * 100
-
+    # Record in price history as "Product Created" with no price yet
     price_record = PriceHistory(
         product_id=new_product.id,
         product_name=new_product.name,
         sku=new_product.sku,
         old_price=None,
-        new_price=product_data.price,
-        old_cost_price=None,
-        new_cost_price=product_data.cost_price,
-        new_margin=margin,
+        new_price=0,
         change_type=PriceChangeType.CREATED,
-        change_reason="Product created",
-        changed_by=manager.user_id,
-        changed_by_name=f"{manager.first_name} {manager.last_name}",
-        changed_by_role=manager.role.value,
+        change_reason="Product created — awaiting Finance Manager pricing",
+        changed_by=admin.user_id,
+        changed_by_name=f"{admin.first_name} {admin.last_name}",
+        changed_by_role=admin.role.value,
         effective_date=datetime.utcnow(),
         applied_branches=0
     )
     await price_record.insert()
 
-    await log_action(
-        user=manager,
+    await log_action(  # type: ignore[func-returns-value]
+        user=admin,
         action=AuditAction.PRODUCT_CREATED,
         module=AuditModule.PRODUCTS,
-        description=f"Created product: {new_product.name} (SKU: {new_product.sku}) — ₦{product_data.price}",
+        description=f"Created product catalog entry: {new_product.name} (SKU: {new_product.sku}) — awaiting pricing",
         target_id=str(new_product.id),
         target_type="product",
         metadata={
             "name": new_product.name,
             "sku": new_product.sku,
-            "price": product_data.price,
-            "cost_price": product_data.cost_price,
-            "margin": round(margin, 2)
+            "category": category.name,
+            "price_status": "unpriced"
         },
         ip_address=extract_ip(request)
     )
 
     return {
-        "message": "Product created successfully",
+        "message": "Product created successfully. Finance Manager can now set the selling price.",
         "product_id": str(new_product.id),
         "name": new_product.name,
-        "selling_price": product_data.price,
-        "cost_price": product_data.cost_price,
-        "margin_percentage": round(margin, 2)
+        "sku": new_product.sku,
+        "is_priced": False,
+        "next_step": "Finance Manager must set selling price via PUT /products/{id}/price"
     }
 
 
-# ==========================================
-# 2. GET PRODUCT (Role-based)
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+# 2. SET / UPDATE SELLING PRICE — Finance Manager only
+# ─────────────────────────────────────────────────────────────
 
-@router.get("/{product_id}")
-async def get_product(product_id: UUID, user: User = Depends(get_current_user)):
+@router.put("/{product_id}/price", response_model=dict)
+async def set_product_price(
+    product_id: UUID,
+    price_update: ProductPriceUpdate,
+    request: Request,
+    finance: User = Depends(get_finance_user)   # Finance Manager only
+):
+    """
+    Finance Manager sets or updates the global selling price.
+
+    - Price applies to ALL branches immediately
+    - reference_cost is optional — taken from the latest PO
+    - Every change is recorded in price history
+    - Inventory selling_price is synced across all branches
+    """
     product = await Product.get(product_id)
     if not product:
-        raise HTTPException(404, "Product not found")
+        raise HTTPException(404, "Product not found.")
 
-    is_admin_or_finance = user.role in [UserRole.ADMIN, UserRole.FINANCE, UserRole.PURCHASE]
+    # Validate selling price vs reference cost if provided
+    if price_update.reference_cost and price_update.reference_cost >= price_update.price:
+        raise HTTPException(
+            400,
+            f"Selling price (₦{price_update.price:,.2f}) must be higher than "
+            f"the cost price (₦{price_update.reference_cost:,.2f})."
+        )
 
-    if is_admin_or_finance:
-        margin = ((product.price - product.cost_price) / product.cost_price) * 100
-        return {
-            "id": str(product.id),
-            "name": product.name,
-            "sku": product.sku,
-            "barcode": product.barcode,
-            "description": product.description,
-            "price": product.price,
+    old_price = product.price
+    old_cost = product.cost_price
+
+    # Calculate margins
+    new_margin = None
+    old_margin = None
+
+    if price_update.reference_cost:
+        new_margin = round(
+            ((price_update.price - price_update.reference_cost) / price_update.reference_cost) * 100, 2
+        )
+
+    if old_price and old_cost:
+        old_margin = round(((old_price - old_cost) / old_cost) * 100, 2)
+
+    # Determine change type
+    if old_price is None:
+        change_type = PriceChangeType.CREATED
+    elif price_update.price > old_price:
+        change_type = PriceChangeType.PRICE_INCREASE
+    else:
+        change_type = PriceChangeType.PRICE_DECREASE
+
+    # Update product
+    product.price = price_update.price
+    if price_update.reference_cost:
+        product.cost_price = price_update.reference_cost
+    product.last_price_change = datetime.utcnow()
+    product.last_price_changed_by = finance.user_id
+    product.updated_at = datetime.utcnow()
+    product.updated_by = finance.user_id
+    await product.save()
+
+    # Sync selling price to inventory across all branches
+    inventory_records = await Inventory.find(
+        {"product_id": str(product_id)}
+    ).to_list()
+
+    branches_updated = 0
+    for inv in inventory_records:
+        inv.selling_price = price_update.price
+        inv.updated_at = datetime.utcnow()
+        await inv.save()
+        branches_updated += 1
+
+    # Record in price history
+    price_record = PriceHistory(
+        product_id=product.id,
+        product_name=product.name,
+        sku=product.sku,
+        old_price=old_price,
+        new_price=price_update.price,
+        old_cost_price=old_cost,
+        new_cost_price=price_update.reference_cost,
+        old_margin=old_margin,
+        new_margin=new_margin,
+        change_type=change_type,
+        change_reason=price_update.reason,
+        changed_by=finance.user_id,
+        changed_by_name=f"{finance.first_name} {finance.last_name}",
+        changed_by_role=finance.role.value,
+        effective_date=datetime.utcnow(),
+        applied_branches=branches_updated
+    )
+    await price_record.insert()
+
+    await log_action(  # type: ignore[func-returns-value]
+        user=finance,
+        action=AuditAction.PRICE_UPDATED,
+        module=AuditModule.PRODUCTS,
+        description=f"{'Set' if old_price is None else 'Updated'} price for {product.name}: "
+                    f"{'unpriced' if old_price is None else f'₦{old_price:,.2f}'} → ₦{price_update.price:,.2f}",
+        target_id=str(product.id),
+        target_type="product",
+        metadata={
+            "product_name": product.name,
+            "old_price": old_price,
+            "new_price": price_update.price,
+            "reference_cost": price_update.reference_cost,
+            "new_margin": new_margin,
+            "reason": price_update.reason,
+            "branches_updated": branches_updated
+        },
+        ip_address=extract_ip(request)
+    )
+
+    return {
+        "message": f"Selling price {'set' if old_price is None else 'updated'} successfully across all branches.",
+        "product_id": str(product_id),
+        "product_name": product.name,
+        "old_price": old_price,
+        "new_price": price_update.price,
+        "reference_cost": price_update.reference_cost,
+        "margin_percentage": new_margin,
+        "branches_updated": branches_updated,
+        "is_priced": True
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 3. GET SINGLE PRODUCT — role based response
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/{product_id}")
+async def get_product(
+    product_id: UUID,
+    user: User = Depends(get_current_user)
+):
+    product = await Product.get(product_id)
+    if not product:
+        raise HTTPException(404, "Product not found.")
+
+    is_privileged = user.role in [UserRole.ADMIN, UserRole.FINANCE]
+    is_priced = product.price is not None
+
+    base = {
+        "id": str(product.id),
+        "name": product.name,
+        "sku": product.sku,
+        "barcode": product.barcode,
+        "description": product.description,
+        "price": product.price,
+        "category_id": str(product.category_id),
+        "image_url": product.image_url,
+        "low_stock_threshold": product.low_stock_threshold,
+        "is_priced": is_priced,
+        "created_at": product.created_at,
+    }
+
+    if is_privileged:
+        margin = None
+        if product.price and product.cost_price:
+            margin = round(
+                ((product.price - product.cost_price) / product.cost_price) * 100, 2
+            )
+        base.update({
             "cost_price": product.cost_price,
-            "margin_percentage": round(margin, 2),
-            "category_id": str(product.category_id),
-            "image_url": product.image_url,
-            "low_stock_threshold": product.low_stock_threshold,
-            "created_at": product.created_at,
+            "margin_percentage": margin,
             "created_by": str(product.created_by),
             "updated_at": product.updated_at,
             "updated_by": str(product.updated_by) if product.updated_by else None,
             "last_price_change": product.last_price_change,
-            "user_role": "admin"
-        }
-    else:
-        return {
-            "id": str(product.id),
-            "name": product.name,
-            "sku": product.sku,
-            "barcode": product.barcode,
-            "description": product.description,
-            "price": product.price,
-            "category_id": str(product.category_id),
-            "image_url": product.image_url,
-            "low_stock_threshold": product.low_stock_threshold,
-            "created_at": product.created_at,
-            "user_role": "staff"
-        }
+            "last_price_changed_by": str(product.last_price_changed_by) if product.last_price_changed_by else None,
+        })
+
+    return base
 
 
-# ==========================================
-# 3. LIST ALL PRODUCTS
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+# 4. LIST ALL PRODUCTS
+# ─────────────────────────────────────────────────────────────
 
 @router.get("/")
 async def get_products(
     search: Optional[str] = None,
     category_id: Optional[UUID] = None,
+    unpriced_only: bool = False,
     page: int = 1,
     limit: int = 50,
     user: User = Depends(get_current_user)
 ):
-    query = Product.find_all()
-
-    if category_id:
-        query = Product.find(Product.category_id == category_id)
+    """
+    unpriced_only=true — Finance Manager uses this to find products
+    that still need a selling price set.
+    """
     if search:
         query = Product.find({
             "$or": [
@@ -187,159 +331,61 @@ async def get_products(
                 {"barcode": {"$regex": search, "$options": "i"}}
             ]
         })
+    elif category_id:
+        query = Product.find(Product.category_id == category_id)
+    elif unpriced_only:
+        query = Product.find({"price": None})
+    else:
+        query = Product.find_all()
 
     skip = (page - 1) * limit
     products = await query.skip(skip).limit(limit).to_list()
 
-    is_admin_or_finance = user.role in [UserRole.ADMIN, UserRole.FINANCE, UserRole.PURCHASE]
+    is_privileged = user.role in [UserRole.ADMIN, UserRole.FINANCE]
 
     result = []
-    for product in products:
+    for p in products:
+        is_priced = p.price is not None
         item = {
-            "id": str(product.id),
-            "name": product.name,
-            "sku": product.sku,
-            "barcode": product.barcode,
-            "price": product.price,
-            "category_id": str(product.category_id),
-            "image_url": product.image_url,
-            "created_at": product.created_at
+            "id": str(p.id),
+            "name": p.name,
+            "sku": p.sku,
+            "barcode": p.barcode,
+            "price": p.price,
+            "category_id": str(p.category_id),
+            "image_url": p.image_url,
+            "is_priced": is_priced,
+            "created_at": p.created_at
         }
-        if is_admin_or_finance:
-            margin = ((product.price - product.cost_price) / product.cost_price) * 100
-            item["cost_price"] = product.cost_price
-            item["margin_percentage"] = round(margin, 2)
+        if is_privileged:
+            margin = None
+            if p.price and p.cost_price:
+                margin = round(((p.price - p.cost_price) / p.cost_price) * 100, 2)
+            item["cost_price"] = p.cost_price
+            item["margin_percentage"] = margin
 
         result.append(item)
 
     return {
         "total": len(result),
         "page": page,
-        "items": result,
-        "viewer_role": "admin" if is_admin_or_finance else "staff"
+        "unpriced_count": sum(1 for p in result if not p["is_priced"]),
+        "items": result
     }
 
 
-# ==========================================
-# 4. UPDATE PRICE
-# ==========================================
-
-@router.put("/{product_id}/price", response_model=dict)
-async def update_product_price(
-    product_id: UUID,
-    price_update: ProductPriceUpdate,
-    request: Request,
-    manager: User = Depends(get_product_manager)
-):
-    product = await Product.get(product_id)
-    if not product:
-        raise HTTPException(404, "Product not found")
-
-    old_price = product.price
-    old_cost_price = product.cost_price
-
-    price_changed = price_update.price is not None
-    cost_changed = price_update.cost_price is not None
-
-    new_price: float = price_update.price if price_changed else old_price  # type: ignore
-    new_cost_price: float = price_update.cost_price if cost_changed else old_cost_price  # type: ignore
-
-    if new_price <= 0:
-        raise HTTPException(400, "Selling price must be positive")
-    if new_cost_price <= 0:
-        raise HTTPException(400, "Cost price must be positive")
-    if new_cost_price >= new_price:
-        raise HTTPException(400, "Cost price must be less than selling price")
-
-    if price_changed:
-        product.price = new_price
-    if cost_changed:
-        product.cost_price = new_cost_price
-
-    product.updated_at = datetime.utcnow()
-    product.updated_by = manager.user_id
-    product.last_price_change = datetime.utcnow()
-    product.last_price_changed_by = manager.user_id
-    await product.save()
-
-    inventory_records = await Inventory.find({"product_id": str(product_id)}).to_list()
-    branches_updated = 0
-    for inventory in inventory_records:
-        inventory.selling_price = new_price
-        await inventory.save()
-        branches_updated += 1
-
-    old_margin = ((old_price - old_cost_price) / old_cost_price) * 100
-    new_margin = ((new_price - new_cost_price) / new_cost_price) * 100
-
-    if price_changed and not cost_changed:
-        change_type = PriceChangeType.PRICE_INCREASE if new_price > old_price else PriceChangeType.PRICE_DECREASE
-    else:
-        change_type = PriceChangeType.COST_ADJUSTMENT
-
-    price_record = PriceHistory(
-        product_id=product.id,
-        product_name=product.name,
-        sku=product.sku,
-        old_price=old_price,
-        new_price=new_price,
-        old_cost_price=old_cost_price,
-        new_cost_price=new_cost_price,
-        old_margin=old_margin,
-        new_margin=new_margin,
-        change_type=change_type,
-        change_reason=price_update.reason,
-        changed_by=manager.user_id,
-        changed_by_name=f"{manager.first_name} {manager.last_name}",
-        changed_by_role=manager.role.value,
-        effective_date=datetime.utcnow(),
-        applied_branches=branches_updated
-    )
-    await price_record.insert()
-
-    await log_action(
-        user=manager,
-        action=AuditAction.PRICE_UPDATED,
-        module=AuditModule.PRODUCTS,
-        description=f"Updated price for {product.name}: ₦{old_price} → ₦{new_price}",
-        target_id=str(product.id),
-        target_type="product",
-        metadata={
-            "product_name": product.name,
-            "old_price": old_price,
-            "new_price": new_price,
-            "old_cost_price": old_cost_price,
-            "new_cost_price": new_cost_price,
-            "reason": price_update.reason
-        },
-        ip_address=extract_ip(request)
-    )
-
-    return {
-        "message": "Product price updated globally",
-        "product_id": str(product.id),
-        "product_name": product.name,
-        "old_price": old_price,
-        "new_price": new_price,
-        "old_margin_percentage": round(old_margin, 2),
-        "new_margin_percentage": round(new_margin, 2),
-        "branches_updated": branches_updated,
-        "applied_to_all_branches": True
-    }
-
-
-# ==========================================
-# 5. PRICE HISTORY
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+# 5. PRICE HISTORY — Finance Manager + Admin
+# ─────────────────────────────────────────────────────────────
 
 @router.get("/{product_id}/price-history")
 async def get_price_history(
     product_id: UUID,
-    current_user: User = Depends(get_product_manager)
+    finance: User = Depends(get_finance_user)
 ):
     product = await Product.get(product_id)
     if not product:
-        raise HTTPException(404, "Product not found")
+        raise HTTPException(404, "Product not found.")
 
     history = await PriceHistory.find(
         PriceHistory.product_id == product_id
@@ -350,53 +396,50 @@ async def get_price_history(
         "product_name": product.name,
         "sku": product.sku,
         "current_price": product.price,
-        "current_cost_price": product.cost_price,
+        "is_priced": product.price is not None,
         "total_changes": len(history),
         "history": [
             {
-                "change_date": record.created_at,
-                "change_type": record.change_type,
-                "old_price": record.old_price,
-                "new_price": record.new_price,
-                "old_cost_price": record.old_cost_price,
-                "new_cost_price": record.new_cost_price,
-                "old_margin": record.old_margin,
-                "new_margin": record.new_margin,
-                "changed_by": record.changed_by_name,
-                "changed_by_role": record.changed_by_role,
-                "reason": record.change_reason,
-                "effective_date": record.effective_date
+                "change_date": r.created_at,
+                "change_type": r.change_type,
+                "old_price": r.old_price,
+                "new_price": r.new_price,
+                "reference_cost": r.new_cost_price,
+                "old_margin": r.old_margin,
+                "new_margin": r.new_margin,
+                "changed_by": r.changed_by_name,
+                "changed_by_role": r.changed_by_role,
+                "reason": r.change_reason,
+                "effective_date": r.effective_date
             }
-            for record in history
+            for r in history
         ]
     }
 
 
-# ==========================================
-# 6. DELETE PRODUCT
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+# 6. DELETE PRODUCT — Admin only
+# ─────────────────────────────────────────────────────────────
 
 @router.delete("/{product_id}")
 async def delete_product(
     product_id: UUID,
     request: Request,
-    manager: User = Depends(get_product_manager)
+    admin: User = Depends(get_admin_user)
 ):
     product = await Product.get(product_id)
     if not product:
-        raise HTTPException(404, "Product not found")
+        raise HTTPException(404, "Product not found.")
 
     product_name = product.name
-
-    # ✅ FIXED: Clean up inventory records across all branches
     inventory_count = await Inventory.find({"product_id": str(product_id)}).count()
 
     await product.delete()
     await PriceHistory.find(PriceHistory.product_id == product_id).delete_many()
-    await Inventory.find({"product_id": str(product_id)}).delete_many()  # ✅ Added
+    await Inventory.find({"product_id": str(product_id)}).delete_many()
 
-    await log_action(
-        user=manager,
+    await log_action(  # type: ignore[func-returns-value]
+        user=admin,
         action=AuditAction.PRODUCT_DELETED,
         module=AuditModule.PRODUCTS,
         description=f"Deleted product: {product_name} (SKU: {product.sku})",
@@ -411,6 +454,6 @@ async def delete_product(
     )
 
     return {
-        "message": f"Product '{product_name}' deleted successfully",
+        "message": f"Product '{product_name}' deleted successfully.",
         "inventory_records_removed": inventory_count
     }
