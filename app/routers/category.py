@@ -4,7 +4,6 @@ from slugify import slugify
 from uuid import UUID
 
 from app.models.category import Category
-# from app.models.product import Product  <-- Uncomment this later when you have the Product model
 from app.models.product import Product
 from app.schemas.category import CategoryCreate, CategoryUpdate, CategoryResponse
 from app.models.user import User

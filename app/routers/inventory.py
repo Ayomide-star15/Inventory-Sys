@@ -10,7 +10,7 @@ from app.models.system_settings import SystemSettings
 from app.schemas.inventory import StockAdjustmentSchema
 from app.models.branch import Branch
 from app.models.product import Product
-from app.utils.stock_alerts import check_and_send_stock_alerts  # ✅ UPDATED
+from app.utils.stock_alerts import check_and_send_stock_alerts  #  UPDATED
 
 router = APIRouter(tags=["Inventory Management"])
 logger = logging.getLogger(__name__)
@@ -128,7 +128,7 @@ async def get_low_stock_items(
     current_user: User = Depends(get_current_user)
 ):
     """Get paginated low-stock items for a specific branch."""
-    if current_user.role in [UserRole.STORE_MANAGER, UserRole.STORE_STAFF]:
+    if current_user.role in [UserRole.STORE_MANAGER]:
         if str(current_user.branch_id) != str(branch_id):
             raise HTTPException(status_code=403, detail="Access denied")
 

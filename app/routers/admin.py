@@ -297,7 +297,7 @@ async def get_audit_logs(
     ]
 
 
-@router.get("/audit-logs/user/{user_id}", response_model=List[dict])
+@router.get("/audit-logs/user/{user_id}", response_model=dict)
 async def get_user_audit_trail(
     user_id: UUID,
     page: int = 1,
@@ -324,8 +324,8 @@ async def get_user_audit_trail(
         "total_actions": len(logs),
         "logs": [
             {
-                "action": log.action,
-                "module": log.module,
+                "action": log.action.value,
+                "module": log.module.value,
                 "description": log.description,
                 "timestamp": log.timestamp,
                 "ip_address": log.ip_address,
