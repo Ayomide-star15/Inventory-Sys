@@ -19,7 +19,7 @@ class UserBase(BaseModel):
     email: EmailStr
     first_name: str
     last_name: str
-    role: UserRole = UserRole.STORE_STAFF
+    role: UserRole = UserRole.STORE_MANAGER
     branch_id: Optional[UUID] = None
 
 

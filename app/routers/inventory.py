@@ -253,14 +253,13 @@ async def get_branch_inventory(
     **Who can call this**
     - **Admin** — any branch, no restriction.
     - **Finance Manager** — any branch (used in valuation reports).
-    - **Store Manager / Store Staff / Sales Staff** — their own assigned
+    - **Store Manager, Sales Staff** — their own assigned
       branch only.
 
     """
     if current_user.role != UserRole.ADMIN:
         if current_user.role in [
             UserRole.STORE_MANAGER,
-            UserRole.STORE_STAFF,
             UserRole.SALES_STAFF,
         ]:
             if str(current_user.branch_id) != str(branch_id):

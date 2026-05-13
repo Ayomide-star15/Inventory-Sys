@@ -11,7 +11,6 @@ class UserRole(str, Enum):
     FINANCE = "Finance Manager"
     PURCHASE = "Purchase Manager"
     STORE_MANAGER = "Store Manager"
-    STORE_STAFF = "Store Staff"
     SALES_STAFF = "Sales Staff"
 
 
