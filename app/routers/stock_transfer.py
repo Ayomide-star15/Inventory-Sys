@@ -36,17 +36,24 @@ async def create_transfer_request(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role != UserRole.STORE_MANAGER:
+    "  Creates a stock transfer request. Store Managers can request only for their assigned branch, while Admins can request for any branch."
+
+    
+    
+    # FIX: admin can create transfers on behalf of any branch
+    if current_user.role not in [UserRole.STORE_MANAGER, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Only Store Managers can create transfer requests")
 
-    if str(transfer_data.to_branch_id) != str(current_user.branch_id):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only request stock INTO your own branch"
-        )
+    # Non-admin: destination must be their own branch
+    if current_user.role != UserRole.ADMIN:
+        if str(transfer_data.to_branch_id) != str(current_user.branch_id):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only request stock INTO your own branch"
+            )
 
     if transfer_data.from_branch_id == transfer_data.to_branch_id:
-        raise HTTPException(status_code=400, detail="Cannot transfer from your own branch to itself")
+        raise HTTPException(status_code=400, detail="Cannot transfer from a branch to itself")
 
     from_branch = await Branch.get(transfer_data.from_branch_id)
     to_branch = await Branch.get(transfer_data.to_branch_id)
@@ -107,7 +114,6 @@ async def create_transfer_request(
         ip_address=extract_ip(request)
     )
 
-    # ✅ Notify source branch managers about the request
     try:
         source_managers = await User.find(
             User.role == UserRole.STORE_MANAGER,
@@ -144,18 +150,27 @@ async def approve_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role != UserRole.STORE_MANAGER:
+    """
+    Approves a pending stock transfer request. 
+    Store Managers can approve only for their source branch, 
+    while Admins can approve transfers for any branch.
+    """
+
+    # FIX: admin can approve any transfer regardless of branch
+    if current_user.role not in [UserRole.STORE_MANAGER, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Only Store Managers can approve transfers")
 
     transfer = await StockTransfer.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    if str(transfer.from_branch_id) != str(current_user.branch_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the source branch manager can approve this request"
-        )
+    # Non-admin: must be the source branch manager
+    if current_user.role != UserRole.ADMIN:
+        if str(transfer.from_branch_id) != str(current_user.branch_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Only the source branch manager can approve this request"
+            )
 
     if transfer.status != TransferStatus.PENDING:
         raise HTTPException(
@@ -212,7 +227,6 @@ async def approve_transfer(
         ip_address=extract_ip(request)
     )
 
-    # ✅ Notify the manager who requested the transfer
     try:
         requester = await User.find_one(User.user_id == transfer.requested_by)
         if requester:
@@ -253,15 +267,23 @@ async def ship_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
+    """
+    Records shipped stock quantities for an approved transfer. 
+    Store Staff and Managers can ship only from their source branch, 
+    while Admins can ship from any branch.
+    """
+    # FIX: admin can ship any transfer
+    if current_user.role not in [UserRole.STORE_MANAGER, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Only Store Staff can ship transfers")
 
     transfer = await StockTransfer.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    if str(transfer.from_branch_id) != str(current_user.branch_id):
-        raise HTTPException(status_code=403, detail="Only source branch staff can ship this transfer")
+    # Non-admin: must be source branch staff
+    if current_user.role != UserRole.ADMIN:
+        if str(transfer.from_branch_id) != str(current_user.branch_id):
+            raise HTTPException(status_code=403, detail="Only source branch staff can ship this transfer")
 
     if transfer.status != TransferStatus.APPROVED:
         raise HTTPException(
@@ -322,15 +344,23 @@ async def receive_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
+    """
+    Records received stock quantities at the destination branch. 
+    Store Staff and Managers can receive only for their assigned destination branch, 
+    while Admins can receive for any branch.
+    """
+    # FIX: admin can receive any transfer
+    if current_user.role not in [UserRole.STORE_MANAGER, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Only Store Staff can receive transfers")
 
     transfer = await StockTransfer.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    if str(transfer.to_branch_id) != str(current_user.branch_id):
-        raise HTTPException(status_code=403, detail="Only destination branch staff can receive this transfer")
+    # Non-admin: must be destination branch staff
+    if current_user.role != UserRole.ADMIN:
+        if str(transfer.to_branch_id) != str(current_user.branch_id):
+            raise HTTPException(status_code=403, detail="Only destination branch staff can receive this transfer")
 
     if transfer.status != TransferStatus.IN_TRANSIT:
         raise HTTPException(
@@ -406,18 +436,27 @@ async def reject_transfer(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role != UserRole.STORE_MANAGER:
+    """
+    Rejects a pending stock transfer request. 
+    Store Managers can reject only for their source branch, 
+    while Admins can reject transfers for any branch.
+    """
+        
+    # FIX: admin can reject any transfer
+    if current_user.role not in [UserRole.STORE_MANAGER, UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Only Store Managers can reject transfers")
 
     transfer = await StockTransfer.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    if str(transfer.from_branch_id) != str(current_user.branch_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the source branch manager can reject this request"
-        )
+    # Non-admin: must be source branch manager
+    if current_user.role != UserRole.ADMIN:
+        if str(transfer.from_branch_id) != str(current_user.branch_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Only the source branch manager can reject this request"
+            )
 
     if transfer.status != TransferStatus.PENDING:
         raise HTTPException(
@@ -464,11 +503,19 @@ async def reject_transfer(
 # ==========================================
 # 6. GET TRANSFER DETAILS
 # ==========================================
-@router.get("/{transfer_id}", response_model=dict)
+@router.get("/{transfer_id}", 
+            response_model=dict,
+            summary="Get full details of a single transfer")
 async def get_transfer_details(
     transfer_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Returns full details of a stock transfer, including line items, requested/approved/sent/received quantities, workflow timestamps, and notes.
+
+Access rules: Admin can view all transfers system-wide, while other roles can only view transfers where their branch is either the source or destination.
+
+    """
     transfer = await StockTransfer.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
@@ -513,6 +560,8 @@ async def list_transfers(
     limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
+
+
     query = {}
 
     if current_user.role != UserRole.ADMIN:

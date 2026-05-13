@@ -28,7 +28,7 @@ class Product(Document):
     # cost_price is stored here as a reference from the latest PO
     # it is updated each time Finance Manager approves a PO and sets a new price
     price: Optional[float] = None
-    cost_price: Optional[float] = None      # reference only — actual cost is on PO
+    cost_price: Optional[float] = None      # reference only — actual cost is on Purchase Order
 
     # === STOCK MANAGEMENT ===
     low_stock_threshold: int = Field(default=10)

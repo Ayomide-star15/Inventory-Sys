@@ -54,8 +54,8 @@ async def create_product(
 
     Workflow:
     1. Admin creates product here (name, SKU, barcode, category)
-    2. Purchase Manager raises PO and enters cost price per unit
-    3. Finance Manager approves PO and sets global selling price
+    2. Purchase Manager raises Purchase order and enters cost price per unit
+    3. Finance Manager approves Purchase Order and sets global selling price
     """
 
     # Duplicate checks
@@ -266,6 +266,7 @@ async def get_product(
     product_id: UUID,
     user: User = Depends(get_current_user)
 ):
+
     product = await Product.get(product_id)
     if not product:
         raise HTTPException(404, "Product not found.")

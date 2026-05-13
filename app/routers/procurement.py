@@ -138,16 +138,6 @@ async def list_purchase_orders(
 async def get_pending_approvals(
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Finance Manager only.
-
-    Returns every PO waiting for approval with full line-item detail.
-    This is the primary action list — Finance Manager opens this page
-    to see what needs to be approved or rejected.
-
-    Also used by the dashboard notification badge:
-      GET /procurement/pending-approval → response.count
-    """
     _require_finance_or_admin(current_user)
 
     pos = await PurchaseOrder.find(
@@ -205,7 +195,6 @@ async def get_purchase_order(
     po_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
-    """Full detail for a single PO including all line items."""
     po = await PurchaseOrder.get(po_id)
     if not po:
         raise HTTPException(404, "Purchase Order not found.")
@@ -273,11 +262,6 @@ async def create_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Purchase Manager creates a PO.
-    Cost price per unit is entered on each line item here.
-    ALL POs require Finance Manager approval — no threshold, no auto-approval.
-    """
     _require_purchase_or_admin(current_user)
 
     supplier = await Supplier.get(data.supplier_id)
@@ -376,7 +360,6 @@ async def approve_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """Finance Manager approves any PO regardless of amount."""
     _require_finance_or_admin(current_user)
 
     po = await PurchaseOrder.get(po_id)
@@ -446,7 +429,6 @@ async def reject_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """Finance Manager rejects a pending PO."""
     _require_finance_or_admin(current_user)
 
     po = await PurchaseOrder.get(po_id)
@@ -494,7 +476,7 @@ async def reject_po(
 
 
 # ─────────────────────────────────────────────────────────────
-# 7. RECEIVE GOODS — Store Staff only
+# 7. RECEIVE GOODS — Store Staff / Admin
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/{po_id}/receive", response_model=dict)
@@ -505,18 +487,20 @@ async def receive_goods(
     current_user: User = Depends(get_current_user)
 ):
     """Store Staff receives goods into inventory. PO must be Approved first."""
-    if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER]:
+    # FIX: admin can receive goods at any branch
+    if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER, UserRole.ADMIN]:
         raise HTTPException(403, "Access Denied: Only Store Staff can receive goods.")
 
     po = await PurchaseOrder.get(po_id)
     if not po:
         raise HTTPException(404, "Purchase Order not found.")
 
-    if not current_user.branch_id:
-        raise HTTPException(400, "Your account has no branch assigned.")
-
-    if str(po.target_branch) != str(current_user.branch_id):
-        raise HTTPException(403, "This order is for a different branch.")
+    # Non-admin: must have a branch and it must match the PO target
+    if current_user.role != UserRole.ADMIN:
+        if not current_user.branch_id:
+            raise HTTPException(400, "Your account has no branch assigned.")
+        if str(po.target_branch) != str(current_user.branch_id):
+            raise HTTPException(403, "This order is for a different branch.")
 
     if po.status != POStatus.APPROVED:
         raise HTTPException(

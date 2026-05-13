@@ -19,14 +19,15 @@ from app.dependencies.auth import get_current_user
 from app.models.audit_log import AuditAction, AuditModule
 from app.utils.audit import log_action
 from app.utils.security import extract_ip
-from app.utils.stock_alerts import check_and_send_stock_alerts  # ✅ UPDATED
+from app.utils.stock_alerts import check_and_send_stock_alerts
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# FIX: added ADMIN so admin can use every sale endpoint
 SALE_ROLES = [
     UserRole.SALES_STAFF,
-    UserRole.STORE_MANAGER
+    UserRole.ADMIN,
 ]
 
 DISCOUNT_ROLES = [
@@ -59,16 +60,30 @@ async def get_products_for_sale(
     request: Request,
     search: Optional[str] = None,
     category_id: Optional[UUID] = None,
+    # FIX: admin can supply any branch_id; other roles use their own
+    branch_id: Optional[UUID] = None,
     page: int = 1,
     limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
-    """Sales Staff. Paginated in-stock products at the cashier's branch."""
+    
+    """
+    Who can call this
+    Sales Staff — branch is automatically taken from their account. Do not send `branch_id`.
+    Admin — has access to this endpoint, but must provide `branch as a query parameter to specify the branch whose products should be returned.
+    """
     if current_user.role not in SALE_ROLES:
         raise HTTPException(status_code=403, detail="Access Denied")
 
-    if not current_user.branch_id:
-        raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
+    # Admin can pass an explicit branch_id; others must use their assigned branch
+    if current_user.role == UserRole.ADMIN:
+        effective_branch_id = branch_id
+        if not effective_branch_id:
+            raise HTTPException(status_code=400, detail="Admin must supply a branch_id query parameter")
+    else:
+        if not current_user.branch_id:
+            raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
+        effective_branch_id = current_user.branch_id
 
     if search:
         product_query = Product.find({
@@ -90,7 +105,7 @@ async def get_products_for_sale(
     for product in products:
         inventory = await Inventory.find_one({
             "product_id": str(product.id),
-            "branch_id": str(current_user.branch_id)
+            "branch_id": str(effective_branch_id)
         })
         if inventory and inventory.quantity > 0:
             category = await Category.get(product.category_id)
@@ -119,13 +134,26 @@ async def get_products_for_sale(
 @router.get("/products/barcode/{barcode}", response_model=ProductInventoryResponse)
 async def search_product_by_barcode(
     barcode: str,
+    branch_id: Optional[UUID] = None,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Who can call this
+    Sales Staff — branch is automatically taken from their account. Do not send `branch_id`.
+    Admin — has access to this endpoint, but must provide `branch as a query parameter to specify the branch whose products should be returned.
+    """
+
     if current_user.role not in SALE_ROLES:
         raise HTTPException(status_code=403, detail="Access Denied")
 
-    if not current_user.branch_id:
-        raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
+    if current_user.role == UserRole.ADMIN:
+        effective_branch_id = branch_id
+        if not effective_branch_id:
+            raise HTTPException(status_code=400, detail="Admin must supply a branch_id query parameter")
+    else:
+        if not current_user.branch_id:
+            raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
+        effective_branch_id = current_user.branch_id
 
     product = await Product.find_one(Product.barcode == barcode)
     if not product:
@@ -133,7 +161,7 @@ async def search_product_by_barcode(
 
     inventory = await Inventory.find_one({
         "product_id": str(product.id),
-        "branch_id": str(current_user.branch_id)
+        "branch_id": str(effective_branch_id)
     })
 
     if not inventory or inventory.quantity <= 0:
@@ -163,13 +191,25 @@ async def search_product_by_barcode(
 @router.post("/quote", response_model=dict)
 async def get_sale_quote(
     quote_data: QuoteRequest,
+    branch_id: Optional[UUID] = None,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Who can call this
+    Sales Staff — branch is automatically taken from their account. Do not send `branch_id`.
+    Admin** — has access to this endpoint, but must provide `branch as a query parameter to specify the branch whose products should be returned.
+    """
     if current_user.role not in SALE_ROLES:
         raise HTTPException(status_code=403, detail="Access Denied")
 
-    if not current_user.branch_id:
-        raise HTTPException(status_code=400, detail="No branch assigned")
+    if current_user.role == UserRole.ADMIN:
+        effective_branch_id = branch_id
+        if not effective_branch_id:
+            raise HTTPException(status_code=400, detail="Admin must supply a branch_id query parameter")
+    else:
+        if not current_user.branch_id:
+            raise HTTPException(status_code=400, detail="No branch assigned")
+        effective_branch_id = current_user.branch_id
 
     if quote_data.discount > 0 and current_user.role not in DISCOUNT_ROLES:
         raise HTTPException(
@@ -178,7 +218,7 @@ async def get_sale_quote(
         )
 
     sys_settings = await get_settings()
-    branch_id_str = str(current_user.branch_id)
+    branch_id_str = str(effective_branch_id)
 
     items_preview = []
     subtotal = 0.0
@@ -265,23 +305,32 @@ async def get_sale_quote(
 async def create_sale(
     sale_data: SaleCreate,
     request: Request,
+    branch_id: Optional[UUID] = None,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Who can call this
+    Sales Staff — branch is automatically taken from their account. Do not send `branch_id`.
+    Admin** — has access to this endpoint, but must provide `branch as a query parameter to specify the branch whose products should be returned.
+    """
     if current_user.role not in SALE_ROLES:
         raise HTTPException(
             status_code=403,
             detail="Access Denied: You are not authorised to create sales"
         )
 
-    if not current_user.branch_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Your account is not assigned to a branch"
-        )
+    if current_user.role == UserRole.ADMIN:
+        effective_branch_id = branch_id
+        if not effective_branch_id:
+            raise HTTPException(status_code=400, detail="Admin must supply a branch_id query parameter")
+    else:
+        if not current_user.branch_id:
+            raise HTTPException(status_code=400, detail="Your account is not assigned to a branch")
+        effective_branch_id = current_user.branch_id
 
     sys_settings = await get_settings()
-    branch_id_str = str(current_user.branch_id)
-    branch = await Branch.get(current_user.branch_id)
+    branch_id_str = str(effective_branch_id)
+    branch = await Branch.get(effective_branch_id)
     if not branch:
         raise HTTPException(status_code=404, detail="Branch not found")
 
@@ -338,7 +387,7 @@ async def create_sale(
 
     new_sale = Sale(
         sale_number=sale_number,
-        branch_id=current_user.branch_id,
+        branch_id=effective_branch_id,
         sold_by=current_user.user_id,
         items=sale_items,
         subtotal=round(subtotal, 2),
@@ -355,7 +404,6 @@ async def create_sale(
     )
     await new_sale.insert()
 
-    # ✅ Deduct inventory and run two-tier stock alert check
     for item in sale_data.items:
         inventory = await Inventory.find_one({
             "product_id": str(item.product_id),
@@ -367,7 +415,7 @@ async def create_sale(
             await inventory.save()
 
             await check_and_send_stock_alerts(
-                inventory, current_user.branch_id, sys_settings
+                inventory, effective_branch_id, sys_settings
             )
 
     await log_action(
@@ -428,6 +476,12 @@ async def list_sales(
     limit: int = 50,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Who can call this
+    Sales Staff — branch is automatically taken from their account. Do not send `branch_id`.
+    Admin** — has access to this endpoint, but must provide `branch as a query parameter to specify the branch whose products should be returned.
+    """
+
     query = {}
 
     if current_user.role == UserRole.SALES_STAFF:
@@ -437,7 +491,7 @@ async def list_sales(
             raise HTTPException(status_code=400, detail="No branch assigned")
         query["branch_id"] = current_user.branch_id
     elif current_user.role in [UserRole.ADMIN, UserRole.FINANCE]:
-        pass
+        pass  # no filter — full visibility
     else:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -482,6 +536,11 @@ async def get_sale_details(
     sale_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Who can call this
+    Sales Staff — branch is automatically taken from their account. Do not send `branch_id`.
+    Admin** — has access to this endpoint, but must provide `branch as a query parameter to specify the branch whose products should be returned.
+    """
     sale = await Sale.get(sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found")
@@ -534,19 +593,32 @@ async def get_sale_details(
 
 @router.get("/my-branch/today", response_model=dict)
 async def get_todays_sales(
+    branch_id: Optional[UUID] = None,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Who can call this
+    Sales Staff — branch is automatically taken from their account. Do not send `branch_id`.
+    Admin** — has access to this endpoint, but must provide `branch as a query parameter to specify the branch whose products should be returned.
+    """
     if current_user.role not in SALE_ROLES:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if not current_user.branch_id:
-        raise HTTPException(status_code=400, detail="No branch assigned")
+    # FIX: admin can pass a branch_id; others must have one assigned
+    if current_user.role == UserRole.ADMIN:
+        effective_branch_id = branch_id
+        if not effective_branch_id:
+            raise HTTPException(status_code=400, detail="Admin must supply a branch_id query parameter")
+    else:
+        if not current_user.branch_id:
+            raise HTTPException(status_code=400, detail="No branch assigned")
+        effective_branch_id = current_user.branch_id
 
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
 
     sales = await Sale.find({
-        "branch_id": current_user.branch_id,
+        "branch_id": effective_branch_id,
         "created_at": {"$gte": today_start, "$lt": today_end},
         "status": SaleStatus.COMPLETED
     }).to_list()
@@ -578,10 +650,16 @@ async def cancel_sale(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role not in [UserRole.STORE_MANAGER, UserRole.SALES_STAFF]:
+    """
+    Who can call this
+    Sales Staff — branch is automatically taken from their account. Do not send `branch_id`.
+    Admin** — has access to this endpoint, but must provide `branch as a query parameter to specify the branch whose products should be returned.
+    """
+    # FIX: added ADMIN
+    if current_user.role not in [UserRole.STORE_MANAGER, UserRole.SALES_STAFF, UserRole.ADMIN]:
         raise HTTPException(
             status_code=403,
-            detail="Only Store Managers and Sales Staff can cancel sales"
+            detail="Only Store Managers, Sales Staff, and Admins can cancel sales"
         )
 
     sale = await Sale.get(sale_id)
