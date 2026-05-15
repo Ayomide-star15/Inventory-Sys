@@ -80,6 +80,7 @@ async def update_supplier(
     request: Request,
     manager: User = Depends(get_product_manager)
 ):
+    
     supplier = await Supplier.get(supplier_id)
     if not supplier:
         raise HTTPException(404, "Supplier not found")

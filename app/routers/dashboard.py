@@ -21,7 +21,7 @@ router = APIRouter()
 async def get_finance_dashboard(
     current_user: User = Depends(get_current_active_user)
 ):
-    if current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
+    if current_user.role not in [UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Access Denied")
 
     now = datetime.utcnow()
