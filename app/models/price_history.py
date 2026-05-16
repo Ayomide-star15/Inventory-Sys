@@ -1,5 +1,4 @@
 # app/models/price_history.py - FIXED VERSION
-
 from beanie import Document
 from pydantic import Field
 from uuid import UUID, uuid4

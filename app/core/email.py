@@ -213,7 +213,40 @@ async def send_transfer_approved_email(
 
 
 # ==========================================
-# 8. LOW STOCK ALERT — Tier 1
+# . TRANSFER REJECTION (notify requesting branch)
+# ==========================================
+async def send_transfer_rejected_email(
+    email_to: str, first_name: str,
+    from_branch: str, to_branch: str,
+    transfer_id: str, rejection_reason: str
+):
+    link = f"{settings.FRONTEND_URL}/transfers/{transfer_id}"
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;color:#333;">
+      <div style="background:#f4f4f4;padding:20px;">
+        <div style="background:white;padding:20px;border-radius:8px;max-width:500px;margin:auto;">
+          <h2 style="color:#e74c3c;">Stock Transfer Request Rejected</h2>
+          <p>Hello {first_name},</p>
+          <p>Your stock transfer request from <strong>{from_branch}</strong> to
+             <strong>{to_branch}</strong> has been rejected.</p>
+          <p><strong>Reason:</strong> {rejection_reason}</p>
+          <a href="{link}" style="display:inline-block;background:#e74c3c;color:white;
+             padding:12px 24px;text-decoration:none;border-radius:5px;font-weight:bold;">
+            View Transfer
+          </a>
+          <p style="margin-top:20px;font-size:12px;color:#777;">
+            Consider raising a new request or sourcing stock via a Purchase Order.
+          </p>
+        </div>
+      </div>
+    </body></html>
+    """
+    await _send(email_to, f"Stock Transfer Request Rejected — {from_branch}", html)
+
+
+
+# ==========================================
+# 9. LOW STOCK ALERT — Tier 1
 # Fires when quantity <= reorder_point
 # ==========================================
 async def send_low_stock_alert_email(
@@ -297,7 +330,7 @@ async def send_low_stock_alert_email(
 
 
 # ==========================================
-# 9. CRITICAL STOCK ALERT — Tier 2
+# 10. CRITICAL STOCK ALERT — Tier 2
 # Fires when quantity <= critical_stock_threshold
 # ==========================================
 async def send_critical_stock_alert_email(

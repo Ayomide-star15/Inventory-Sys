@@ -19,7 +19,8 @@ from app.utils.audit import log_action
 from app.utils.security import extract_ip
 from app.core.email import (
     send_transfer_request_email,
-    send_transfer_approved_email
+    send_transfer_approved_email,
+    send_transfer_rejected_email
 )
 
 router = APIRouter(prefix="/stock-transfers", tags=["Stock Transfers"])
@@ -489,6 +490,20 @@ async def reject_transfer(
         branch_name=from_branch_name,
         ip_address=extract_ip(request)
     )
+
+    try:
+        requester = await User.find_one(User.user_id == transfer.requested_by)
+        if requester:
+            await send_transfer_rejected_email(
+                email_to=requester.email,
+                first_name=requester.first_name,
+                from_branch=from_branch_name,
+                to_branch=to_branch_name,
+                transfer_id=str(transfer.id),
+                rejection_reason=reject_data.rejection_reason
+            )
+    except Exception as e:
+        logger.error(f"Transfer rejected email failed: {e}")
 
     return {
         "message": "Transfer request rejected",
