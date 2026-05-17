@@ -70,7 +70,7 @@ async def list_purchase_orders(
     Role scoping:
     - Finance Manager / Admin  → all POs system-wide
     - Purchase Manager         → only POs they created
-    - Store Manager / Staff    → only POs targeting their branch
+    - Store Manager    → only POs targeting their branch
     """
 
     query = {}
@@ -78,7 +78,7 @@ async def list_purchase_orders(
     if current_user.role == UserRole.PURCHASE:
         query["created_by"] = current_user.user_id
 
-    elif current_user.role in [UserRole.STORE_MANAGER, UserRole.STORE_STAFF]:
+    elif current_user.role in [UserRole.STORE_MANAGER]:
         if not current_user.branch_id:
             raise HTTPException(400, "Your account has no branch assigned.")
         query["target_branch"] = current_user.branch_id
@@ -195,6 +195,10 @@ async def get_purchase_order(
     po_id: UUID,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Store Manager targeting their branch only
+     Purchase Manager and Admin can view any purchase order by Id"
+    """
     po = await PurchaseOrder.get(po_id)
     if not po:
         raise HTTPException(404, "Purchase Order not found.")
@@ -202,9 +206,9 @@ async def get_purchase_order(
     if current_user.role == UserRole.PURCHASE:
         if po.created_by != current_user.user_id:
             raise HTTPException(403, "You can only view your own Purchase Orders.")
-    elif current_user.role in [UserRole.STORE_MANAGER, UserRole.STORE_STAFF]:
+    elif current_user.role in [UserRole.STORE_MANAGER]:
         if str(po.target_branch) != str(current_user.branch_id):
-            raise HTTPException(403, "This PO is for a different branch.")
+            raise HTTPException(403, "This Purchase Order is for a different branch.")
     elif current_user.role not in [UserRole.FINANCE, UserRole.ADMIN]:
         raise HTTPException(403, "Access Denied.")
 
@@ -476,7 +480,7 @@ async def reject_po(
 
 
 # ─────────────────────────────────────────────────────────────
-# 7. RECEIVE GOODS — Store Staff / Admin
+# 7. RECEIVE GOODS — Store Manager / Admin
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/{po_id}/receive", response_model=dict)
@@ -486,9 +490,9 @@ async def receive_goods(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """Store Staff receives goods into inventory. PO must be Approved first."""
+    """Store Manager receives goods into inventory. PO must be Approved first."""
     # FIX: admin can receive goods at any branch
-    if current_user.role not in [UserRole.STORE_STAFF, UserRole.STORE_MANAGER, UserRole.ADMIN]:
+    if current_user.role not in [UserRole.STORE_MANAGER, UserRole.ADMIN]:
         raise HTTPException(403, "Access Denied: Only Store Staff can receive goods.")
 
     po = await PurchaseOrder.get(po_id)
