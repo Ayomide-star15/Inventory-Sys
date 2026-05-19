@@ -65,12 +65,23 @@ async def list_purchase_orders(
     current_user: User = Depends(get_current_user)
 ):
     """
-    List purchase orders with optional filters.
+     List purchase orders with optional filters.
 
-    Role scoping:
-    - Finance Manager / Admin  → all POs system-wide
-    - Purchase Manager         → only POs they created
-    - Store Manager    → only POs targeting their branch
+    Access Control:
+    - Finance Manager / Admin:
+      Can view all Purchase Orders system-wide.
+
+    - Purchase Manager:
+      Can only view Purchase Orders they created.
+
+    - Store Manager:
+      Can only view Purchase Orders for their assigned branch.
+
+    Permissions:
+     FINANCE
+     ADMIN
+     PURCHASE
+     STORE_MANAGER
     """
 
     query = {}
@@ -138,6 +149,20 @@ async def list_purchase_orders(
 async def get_pending_approvals(
     current_user: User = Depends(get_current_user)
 ):
+    """
+Retrieve all Purchase Orders awaiting approval.
+
+    Access Control:
+    - Finance Manager:
+      Can view all pending approvals.
+
+    - Admin:
+      Can view all pending approvals.
+
+    Permissions:
+     FINANCE
+     ADMIN
+    """
     _require_finance_or_admin(current_user)
 
     pos = await PurchaseOrder.find(
@@ -196,8 +221,21 @@ async def get_purchase_order(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Store Manager targeting their branch only
-     Purchase Manager and Admin can view any purchase order by Id"
+     Retrieve a single Purchase Order by ID.
+
+    Access Control:
+
+    - Purchase Manager:
+      Can view only Purchase Orders they created.
+
+    - Store Manager:
+      Can only view Purchase Orders for their assigned branch.
+
+    - Finance Manager:
+      Can view any Purchase Order.
+
+    - Admin:
+      Can view any Purchase Order
     """
     po = await PurchaseOrder.get(po_id)
     if not po:
@@ -266,6 +304,17 @@ async def create_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Create a new Purchase Order.
+
+    Access Control:
+
+    - Purchase Manager:
+      Can create Purchase Orders.
+
+    - Admin:
+      Can create Purchase Orders.
+    """
     _require_purchase_or_admin(current_user)
 
     supplier = await Supplier.get(data.supplier_id)
@@ -364,6 +413,17 @@ async def approve_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    """
+     Approve a pending Purchase Order.
+
+    Access Control:
+
+    - Finance Manager:
+      Can approve Purchase Orders.
+
+    - Admin:
+      Can approve Purchase Orders.
+    """
     _require_finance_or_admin(current_user)
 
     po = await PurchaseOrder.get(po_id)
@@ -433,6 +493,17 @@ async def reject_po(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
+    """
+     Reject a pending Purchase Order.
+
+    Access Control:
+
+    - Finance Manager:
+      Can reject Purchase Orders.
+
+    - Admin:
+      Can reject Purchase Orders.
+    """
     _require_finance_or_admin(current_user)
 
     po = await PurchaseOrder.get(po_id)
@@ -490,7 +561,18 @@ async def receive_goods(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """Store Manager receives goods into inventory. PO must be Approved first."""
+    """
+    Receive goods and update inventory.
+
+    Access Control:
+
+    - Store Manager:
+      Can receive goods only for their assigned branch.
+
+    - Admin:
+      Can receive goods for branch.
+
+    """
     # FIX: admin can receive goods at any branch
     if current_user.role not in [UserRole.STORE_MANAGER, UserRole.ADMIN]:
         raise HTTPException(403, "Access Denied: Only Store Staff can receive goods.")
